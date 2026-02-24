@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 
 export default function Login() {
   const [isRegister, setIsRegister] = useState(false);
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState('adam');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [grossIncome, setGrossIncome] = useState('');
@@ -49,8 +49,11 @@ export default function Login() {
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label>Username</label>
-            <input className="form-input" value={username} onChange={e => setUsername(e.target.value)} required />
+            <label>Who's logging in?</label>
+            <select className="form-select" value={username} onChange={e => setUsername(e.target.value)} required>
+              <option value="adam">Adam</option>
+              <option value="aruto">Aruto</option>
+            </select>
           </div>
           <div className="form-group">
             <label>Password</label>
