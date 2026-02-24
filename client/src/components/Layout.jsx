@@ -23,7 +23,7 @@ export default function Layout() {
       <nav className="sidebar">
         <div className="sidebar-brand">
           <div className="sidebar-logo">
-            <img src="/logo.png" alt="Adam & Aruto" className="brand-logo" />
+            <img src="https://i.ibb.co/9mTK5m6f/logo.png" alt="Adam & Aruto" className="brand-logo" />
           </div>
           <h1>Adam & Aruto's Budget</h1>
           <p>Our Household Finance</p>

@@ -41,7 +41,7 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <img src="/logo.png" alt="Adam & Aruto" className="login-logo" />
+        <img src="https://i.ibb.co/9mTK5m6f/logo.png" alt="Adam & Aruto" className="login-logo" />
         <h1>Adam & Aruto's Budget</h1>
         <p className="subtitle">Our Household Finance</p>
 
