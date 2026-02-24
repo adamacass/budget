@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: household-budget
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build && cd client && npm install && npx vite build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    disk:
+      name: budget-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
