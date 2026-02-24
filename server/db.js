@@ -141,6 +141,13 @@ function initSchema() {
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS category_budgets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT UNIQUE NOT NULL,
+      monthly_amount REAL NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   // Auto-seed default users if none exist
@@ -161,8 +168,33 @@ function initSchema() {
       db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('savings', 0, user1.id);
       db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('credit_card', 0, user1.id);
       db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('investment', 0, user1.id);
+
+      // Seed default levers
+      const insertLever = db.prepare('INSERT INTO levers (name, description, lever_type, value, set_by) VALUES (?, ?, ?, ?, ?)');
+      insertLever.run('Offset Account %', 'Percentage of surplus allocated to offset account', 'percentage', 50, user1.id);
+      insertLever.run('Savings %', 'Percentage of surplus allocated to savings', 'percentage', 30, user1.id);
+      insertLever.run('Investment %', 'Percentage of surplus allocated to investments', 'percentage', 10, user1.id);
+      insertLever.run('Budget Scale %', 'Scale all category budgets (100 = conservative base, 120 = 20% more spending room, 80 = tighter)', 'percentage', 100, user1.id);
+      console.log('Default levers seeded');
     }
     console.log('Default users seeded: adam, aruto');
+  }
+
+  // Seed category budgets if none exist (conservative / high-savings baseline)
+  const budgetCount = db.prepare('SELECT COUNT(*) as count FROM category_budgets').get().count;
+  if (budgetCount === 0) {
+    const insertBudget = db.prepare('INSERT INTO category_budgets (category, monthly_amount) VALUES (?, ?)');
+    const conservativeBudgets = [
+      ['Groceries', 800], ['Dining Out', 200], ['Transport', 200],
+      ['Utilities', 250], ['Insurance', 200], ['Entertainment', 100],
+      ['Health', 100], ['Clothing', 80], ['Personal Care', 60],
+      ['Subscriptions', 50], ['Pets', 50], ['Gifts', 50],
+      ['Education', 50], ['Home', 100], ['Other', 100]
+    ];
+    for (const [cat, amt] of conservativeBudgets) {
+      insertBudget.run(cat, amt);
+    }
+    console.log('Category budgets seeded (conservative / high-savings): $' + conservativeBudgets.reduce((s, b) => s + b[1], 0) + '/mo');
   }
 }
 

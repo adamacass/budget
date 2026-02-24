@@ -36,11 +36,15 @@ export default function Projections() {
     return { key, label: bench.label, actual, low: bench.low, mid: midPoint, high: bench.high, status };
   });
 
+  const budgetedExpenses = data.budgeted_expenses || 0;
+  const budgetedSurplus = data.budgeted_surplus || 0;
+  const expenseDiff = budgetedExpenses - data.monthly_expenses;
+
   return (
     <div>
       <div className="page-header">
         <h2>Projections & Analysis</h2>
-        <p>12-month forecast and spending benchmarks</p>
+        <p>12-month forecast based on your budget plan</p>
       </div>
 
       {/* Status banner */}
@@ -54,7 +58,7 @@ export default function Projections() {
         <div>
           <div style={{ fontWeight: 700, fontSize: '1rem' }}>{data.message}</div>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-            Monthly net income: {fmtMoney(data.monthly_net_income)} | Expenses: {fmtMoney(data.monthly_expenses)} | Mortgage: {fmtMoney(data.mortgage)}
+            Net income: {fmtMoney(data.monthly_net_income)} | Budget: {fmtMoney(budgetedExpenses)} | Actual: {fmtMoney(data.monthly_expenses)} | Mortgage: {fmtMoney(data.mortgage)}
           </div>
         </div>
       </div>
@@ -69,20 +73,32 @@ export default function Projections() {
         <div className="stat-card">
           <div className="stat-label">Monthly Expenses</div>
           <div className="stat-value negative">{fmtMoney(data.monthly_expenses)}</div>
-          <div className="card-sub">Last 30 days</div>
+          <div className="card-sub">
+            Budget: {fmtMoney(budgetedExpenses)}
+            {data.monthly_expenses > 0 && (
+              expenseDiff >= 0
+                ? <span style={{ color: 'var(--green)', marginLeft: 6 }}>({fmtMoney(expenseDiff)} under)</span>
+                : <span style={{ color: 'var(--red)', marginLeft: 6 }}>({fmtMoney(Math.abs(expenseDiff))} over)</span>
+            )}
+          </div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Monthly Surplus</div>
           <div className={`stat-value ${data.monthly_surplus >= 0 ? 'positive' : 'negative'}`}>
             {data.monthly_surplus >= 0 ? '+' : ''}{fmtMoney(data.monthly_surplus)}
           </div>
-          <div className="card-sub">After mortgage + expenses</div>
+          <div className="card-sub">
+            Budgeted: {budgetedSurplus >= 0 ? '+' : ''}{fmtMoney(budgetedSurplus)}
+          </div>
         </div>
       </div>
 
       {/* 12 Month Projection */}
       <div className="card">
         <div className="card-title">12-Month Net Worth Projection</div>
+        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+          Based on sticking to the {fmtMoney(budgetedExpenses)}/mo budget with {fmtMoney(budgetedSurplus)}/mo surplus
+        </p>
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={data.projections}>
             <XAxis dataKey="month" tick={{ fill: '#8b8fa3', fontSize: 12 }} />
@@ -111,7 +127,7 @@ export default function Projections() {
           <div className="card-title">Goal Achievement Forecast</div>
           {data.goals.map(g => {
             const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount) * 100 : 0;
-            const monthlyRate = data.monthly_surplus > 0 ? data.monthly_surplus * 0.3 : 0; // rough
+            const monthlyRate = budgetedSurplus > 0 ? budgetedSurplus * 0.3 : 0;
             const remaining = g.target_amount - g.current_amount;
             const monthsToGoal = monthlyRate > 0 ? Math.ceil(remaining / monthlyRate) : null;
             return (

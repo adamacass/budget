@@ -52,6 +52,10 @@ export const addIncome = (data) => apiFetch('/api/income', { method: 'POST', bod
 export const getAllocations = () => apiFetch('/api/allocations');
 export const addAllocations = (data) => apiFetch('/api/allocations', { method: 'POST', body: JSON.stringify(data) });
 
+// Budgets
+export const getBudgets = () => apiFetch('/api/budgets');
+export const updateBudget = (category, monthly_amount) => apiFetch(`/api/budgets/${encodeURIComponent(category)}`, { method: 'PUT', body: JSON.stringify({ monthly_amount }) });
+
 // Balances
 export const getBalances = () => apiFetch('/api/balances');
 export const updateBalance = (account, balance) => apiFetch(`/api/balances/${account}`, { method: 'PUT', body: JSON.stringify({ balance }) });

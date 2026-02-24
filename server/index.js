@@ -367,6 +367,21 @@ app.get('/api/claude/latest-advice', authMiddleware, (req, res) => {
   res.json(row || { content: 'No advice generated yet. Click "Get Claude Advice" to generate.', advice_type: type || 'nightly' });
 });
 
+// ===================== CATEGORY BUDGETS =====================
+
+app.get('/api/budgets', authMiddleware, (req, res) => {
+  const db = getDb();
+  res.json(db.prepare('SELECT * FROM category_budgets ORDER BY category').all());
+});
+
+app.put('/api/budgets/:category', authMiddleware, (req, res) => {
+  const { monthly_amount } = req.body;
+  const db = getDb();
+  db.prepare("UPDATE category_budgets SET monthly_amount = ?, updated_at = datetime('now') WHERE category = ?").run(monthly_amount, req.params.category);
+  const row = db.prepare('SELECT * FROM category_budgets WHERE category = ?').get(req.params.category);
+  res.json(row);
+});
+
 // ===================== DASHBOARD / SUMMARY =====================
 
 app.get('/api/dashboard', authMiddleware, (req, res) => {
@@ -401,6 +416,28 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
   const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
   const users = db.prepare('SELECT id, display_name, gross_income, pay_cycle FROM users').all();
 
+  // Budget data
+  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
+  const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+  const weeklyBudget = totalMonthlyBudget * 12 / 52;
+
+  // Estimated monthly income from tax calc
+  const allUsers = db.prepare('SELECT * FROM users').all();
+  let totalAnnualNet = 0;
+  for (const u of allUsers) {
+    const grossExSuper = u.gross_income / (1 + u.super_rate);
+    let tax = 0;
+    if (grossExSuper > 190000) tax = 51667 + (grossExSuper - 190000) * 0.45;
+    else if (grossExSuper > 135000) tax = 29467 + (grossExSuper - 135000) * 0.37;
+    else if (grossExSuper > 45000) tax = 5092 + (grossExSuper - 45000) * 0.325;
+    else if (grossExSuper > 18200) tax = (grossExSuper - 18200) * 0.19;
+    totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
+  }
+  const estimatedMonthlyIncome = totalAnnualNet / 12;
+  const mortgage = 4587.83;
+
   res.json({
     monthly_expenses: monthlyExpenses.total || 0,
     weekly_expenses: weeklyExpenses.total || 0,
@@ -411,7 +448,11 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
     balances,
     goals,
     users,
-    mortgage_monthly: 4587.83
+    mortgage_monthly: mortgage,
+    estimated_monthly_income: Math.round(estimatedMonthlyIncome),
+    budgeted_expenses: Math.round(totalMonthlyBudget),
+    weekly_budget: Math.round(weeklyBudget),
+    budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) }))
   });
 });
 
@@ -492,7 +533,13 @@ app.get('/api/projections', authMiddleware, (req, res) => {
   const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
   const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
 
-  // Project 12 months
+  // Budget data
+  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
+  const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+  const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget - mortgage;
+
+  // Project 12 months using budgeted surplus (the plan)
   const projections = [];
   let runningOffset = balances.offset;
   let runningSavings = balances.savings;
@@ -505,7 +552,7 @@ app.get('/api/projections', authMiddleware, (req, res) => {
   for (let m = 1; m <= 12; m++) {
     const date = new Date();
     date.setMonth(date.getMonth() + m);
-    const surplus = Math.max(0, monthlySurplus);
+    const surplus = Math.max(0, budgetedSurplus);
     runningOffset += surplus * offsetPct;
     runningSavings += surplus * savingsPct;
     runningInvestment += surplus * investPct;
@@ -547,6 +594,8 @@ app.get('/api/projections', authMiddleware, (req, res) => {
     monthly_expenses: Math.round(monthlyExpenseAvg),
     mortgage,
     monthly_surplus: Math.round(monthlySurplus),
+    budgeted_expenses: Math.round(totalMonthlyBudget),
+    budgeted_surplus: Math.round(budgetedSurplus),
     projections,
     balances,
     goals,
