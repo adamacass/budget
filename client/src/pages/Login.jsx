@@ -41,8 +41,9 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1>Budget Tracker</h1>
-        <p className="subtitle">Household Finance for Two</p>
+        <img src="/logo.png" alt="Adam & Aruto" className="login-logo" />
+        <h1>Adam & Aruto's Budget</h1>
+        <p className="subtitle">Our Household Finance</p>
 
         {error && <div className="error-msg">{error}</div>}
 

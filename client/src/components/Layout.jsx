@@ -22,8 +22,11 @@ export default function Layout() {
     <div className="app-layout">
       <nav className="sidebar">
         <div className="sidebar-brand">
-          <h1>Budget Tracker</h1>
-          <p>Household Finance</p>
+          <div className="sidebar-logo">
+            <img src="/logo.png" alt="Adam & Aruto" className="brand-logo" />
+          </div>
+          <h1>Adam & Aruto's Budget</h1>
+          <p>Our Household Finance</p>
         </div>
 
         <div className="sidebar-nav">

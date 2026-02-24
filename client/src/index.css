@@ -57,13 +57,30 @@ a:hover { color: var(--accent-hover); }
   padding: 0 1.25rem 1.5rem;
   border-bottom: 1px solid var(--border);
   margin-bottom: 1rem;
+  text-align: center;
+}
+
+.sidebar-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0.75rem;
+}
+
+.brand-logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 3px solid var(--accent);
+  box-shadow: 0 0 20px rgba(108, 92, 231, 0.3);
 }
 
 .sidebar-brand h1 {
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .sidebar-brand p {
@@ -410,6 +427,17 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   padding: 2.5rem;
   width: 100%;
   max-width: 400px;
+}
+
+.login-logo {
+  display: block;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  object-fit: cover;
+  margin: 0 auto 1rem;
+  border: 3px solid var(--accent);
+  box-shadow: 0 0 25px rgba(108, 92, 231, 0.35);
 }
 
 .login-card h1 {
