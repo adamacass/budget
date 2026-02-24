@@ -4,8 +4,8 @@ const bcrypt = require('bcryptjs');
 
 const db = getDb();
 
-const hash1 = bcrypt.hashSync('changeme123', 10);
-const hash2 = bcrypt.hashSync('changeme123', 10);
+const hash1 = bcrypt.hashSync('GoPies2023', 10);
+const hash2 = bcrypt.hashSync('GoPies2023', 10);
 
 // Create default users
 const insertUser = db.prepare(`
@@ -13,8 +13,8 @@ const insertUser = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
-insertUser.run('partner1', 'Partner 1', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly');
-insertUser.run('partner2', 'Partner 2', hash2, 'partner', 70000, 0.115, 0.04, 'weekly');
+insertUser.run('adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly');
+insertUser.run('aruto', 'Aruto', hash2, 'partner', 70000, 0.115, 0.04, 'weekly');
 
 // Set initial offset account balance
 const insertBalance = db.prepare(`
@@ -22,7 +22,7 @@ const insertBalance = db.prepare(`
   VALUES (?, ?, ?)
 `);
 
-const user1 = db.prepare('SELECT id FROM users WHERE username = ?').get('partner1');
+const user1 = db.prepare('SELECT id FROM users WHERE username = ?').get('adam');
 if (user1) {
   insertBalance.run('offset', 57000, user1.id);
   insertBalance.run('savings', 0, user1.id);
@@ -58,8 +58,7 @@ if (user1) {
 }
 
 console.log('Setup complete! Default users created:');
-console.log('  partner1 / changeme123 (Primary - $159k, fortnightly)');
-console.log('  partner2 / changeme123 (Partner - $70k, weekly)');
+console.log('  adam / GoPies2023 (Primary - $159k, fortnightly)');
+console.log('  aruto / GoPies2023 (Partner - $70k, weekly)');
 console.log('  Offset account set to $57,000');
 console.log('  Default savings goals and levers created');
-console.log('\nPlease change passwords after first login!');
