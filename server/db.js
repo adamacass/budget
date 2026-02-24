@@ -139,6 +139,28 @@ function initSchema() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
+
+  // Auto-seed default users if none exist
+  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+  if (userCount === 0) {
+    console.log('No users found, seeding defaults...');
+    const hash1 = bcrypt.hashSync('GoPies2023', 10);
+    const hash2 = bcrypt.hashSync('GoPies2023', 10);
+    const insertUser = db.prepare(
+      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    insertUser.run('adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly');
+    insertUser.run('aruto', 'Aruto', hash2, 'partner', 70000, 0.115, 0.04, 'weekly');
+
+    const user1 = db.prepare('SELECT id FROM users WHERE username = ?').get('adam');
+    if (user1) {
+      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('offset', 57000, user1.id);
+      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('savings', 0, user1.id);
+      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('credit_card', 0, user1.id);
+      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('investment', 0, user1.id);
+    }
+    console.log('Default users seeded: adam, aruto');
+  }
 }
 
 module.exports = { getDb };
