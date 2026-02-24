@@ -7,7 +7,7 @@
     "dev:server": "node server/index.js",
     "dev:client": "cd client && npx vite --host",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "build": "cd client && npx vite build",
+    "build": "cd client && npm install && npx vite build",
     "start": "NODE_ENV=production node server/index.js",
     "setup": "node server/setup.js"
   },
