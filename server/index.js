@@ -7,7 +7,7 @@ const cron = require('node-cron');
 const XLSX = require('xlsx');
 const { getDb } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
-const { getPayDayAdvice, getNightlySummary } = require('./claude');
+const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice } = require('./claude');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -326,6 +326,196 @@ app.post('/api/claude/payday-advice', authMiddleware, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+app.post('/api/claude/account-sweep', authMiddleware, async (req, res) => {
+  const { transaction_balance } = req.body;
+  const db = getDb();
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+
+  const accounts = ['offset', 'savings', 'credit_card', 'investment'];
+  const accountBalances = {};
+  for (const acct of accounts) {
+    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    accountBalances[acct] = row ? row.balance : 0;
+  }
+
+  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
+  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
+
+  // Get expenses from last 30 days for context (also used for month-to-date calc inside prompt)
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const recentExpenses = db.prepare('SELECT * FROM expenses WHERE expense_date >= ? ORDER BY expense_date DESC').all(thirtyDaysAgo);
+  const upcomingExpenses = db.prepare('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC').all();
+
+  try {
+    const result = await getAccountSweepAdvice({
+      user, transactionBalance: transaction_balance, accountBalances, goals, levers, recentExpenses, upcomingExpenses, budgets, budgetScale
+    });
+    db.prepare('INSERT INTO claude_advice (advice_type, content, context_data) VALUES (?, ?, ?)').run(
+      'account-sweep', result.advice, JSON.stringify({ transaction_balance, user_id: req.user.id })
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===================== CREDIT CARD STATEMENT IMPORT =====================
+
+app.post('/api/statements/parse', authMiddleware, (req, res) => {
+  const { csv_text } = req.body;
+  if (!csv_text || !csv_text.trim()) {
+    return res.status(400).json({ error: 'No CSV data provided' });
+  }
+
+  const lines = csv_text.trim().split('\n');
+  if (lines.length < 2) {
+    return res.status(400).json({ error: 'CSV needs at least a header row and one data row' });
+  }
+
+  // Parse header row
+  const headerLine = lines[0];
+  const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().trim());
+
+  // Try to detect column mappings
+  const dateCol = headers.findIndex(h => /date/.test(h));
+  const amountCol = headers.findIndex(h => /amount|debit|value/.test(h));
+  const descCol = headers.findIndex(h => /description|details|narrative|memo|merchant|transaction/.test(h));
+  const creditCol = headers.findIndex(h => /credit/.test(h));
+  const debitCol = headers.findIndex(h => /debit/.test(h));
+
+  if (dateCol === -1) {
+    return res.status(400).json({ error: 'Could not find a date column. Expected a header containing "date".' });
+  }
+  if (amountCol === -1 && debitCol === -1) {
+    return res.status(400).json({ error: 'Could not find an amount column. Expected a header containing "amount", "debit", or "value".' });
+  }
+
+  const transactions = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const cols = parseCSVLine(line);
+    const rawDate = cols[dateCol]?.trim();
+    const description = cols[descCol >= 0 ? descCol : 0]?.trim() || '';
+
+    // Parse amount — handle debit/credit columns or single amount
+    let amount = 0;
+    if (debitCol >= 0 && creditCol >= 0) {
+      const debit = parseFloat((cols[debitCol] || '').replace(/[$,]/g, '')) || 0;
+      const credit = parseFloat((cols[creditCol] || '').replace(/[$,]/g, '')) || 0;
+      amount = debit > 0 ? debit : -credit; // Positive = expense, negative = refund/payment
+    } else {
+      amount = parseFloat((cols[amountCol] || '').replace(/[$,]/g, '')) || 0;
+    }
+
+    // Skip zero-amount rows, payments (credits), and header-like rows
+    if (amount <= 0) continue;
+
+    // Parse date — try common formats
+    const parsedDate = parseStatementDate(rawDate);
+    if (!parsedDate) continue;
+
+    // Auto-categorize based on description
+    const category = autoCategorizeTxn(description);
+
+    transactions.push({
+      expense_date: parsedDate,
+      description: description,
+      amount: Math.round(amount * 100) / 100,
+      category: category,
+      entry_type: 'actual',
+      source: 'credit_card_statement'
+    });
+  }
+
+  res.json({ transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
+});
+
+app.post('/api/statements/import', authMiddleware, (req, res) => {
+  const { transactions } = req.body;
+  if (!transactions || !transactions.length) {
+    return res.status(400).json({ error: 'No transactions to import' });
+  }
+
+  const db = getDb();
+  const insert = db.prepare(
+    'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0)'
+  );
+  const importAll = db.transaction((items) => {
+    for (const t of items) {
+      insert.run(req.user.id, t.category, t.source || 'credit_card_statement', t.description, t.amount, t.expense_date, t.entry_type || 'actual');
+    }
+  });
+  importAll(transactions);
+  res.json({ message: `${transactions.length} transactions imported as expenses` });
+});
+
+// CSV parsing helper — handles quoted fields
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+      else { inQuotes = !inQuotes; }
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+// Date parsing for statement dates
+function parseStatementDate(raw) {
+  if (!raw) return null;
+  // Try ISO format (2024-01-15)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  // Try DD/MM/YYYY (Australian format)
+  let m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  // Try DD/MM/YY
+  m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
+  if (m) return `20${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  // Try "DD Mon YYYY" or "DD Mon YY"
+  const months = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
+  m = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})$/);
+  if (m) {
+    const yr = m[3].length === 2 ? '20' + m[3] : m[3];
+    const mo = months[m[2].toLowerCase().substring(0, 3)];
+    if (mo) return `${yr}-${mo}-${m[1].padStart(2, '0')}`;
+  }
+  return null;
+}
+
+// Simple keyword-based auto-categorizer
+function autoCategorizeTxn(desc) {
+  const d = desc.toLowerCase();
+  if (/woolworths|coles|aldi|iga|harris farm|market|grocer|fruit|butcher/.test(d)) return 'Groceries';
+  if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch/.test(d)) return 'Dining Out';
+  if (/uber|lyft|taxi|cabcharge|opal|linkt|toll|parking|fuel|petrol|bp\s|shell|caltex|ampol|7-?eleven|rego|rms|nrma|car\s?wash/.test(d)) return 'Transport';
+  if (/energy|water|gas|telstra|optus|vodafone|tpg|iinet|internet|broadband|electricity|ausgrid|origin|agl/.test(d)) return 'Utilities';
+  if (/insurance|allianz|qbe|suncorp|nib|medibank|bupa|hcf|ahm/.test(d)) return 'Insurance';
+  if (/netflix|spotify|disney|stan|binge|kayo|apple\.com|youtube|amazon prime|subscribe|membership/.test(d)) return 'Subscriptions';
+  if (/cinema|movies|ticket|event|concert|sport|game|bowling|golf|tennis|museum|zoo|theme park|luna park/.test(d)) return 'Entertainment';
+  if (/pharmacy|chemist|doctor|gp\s|medical|dental|dentist|physio|gym|fitness|pool|yoga|pilates|health/.test(d)) return 'Health';
+  if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe/.test(d)) return 'Clothing';
+  if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav/.test(d)) return 'Personal Care';
+  if (/pet|vet|petbarn|petsmart|pet circle|animal/.test(d)) return 'Pets';
+  if (/gift|flower|present|hamper/.test(d)) return 'Gifts';
+  if (/course|book|udemy|education|tutor|uni|school|tafe/.test(d)) return 'Education';
+  if (/bunnings|ikea|officeworks|furniture|homeware|hardware|garden|plumb|electr/.test(d)) return 'Home';
+  return 'Other';
+}
 
 app.post('/api/claude/nightly-summary', authMiddleware, async (req, res) => {
   const db = getDb();

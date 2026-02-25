@@ -1,7 +1,7 @@
 import React from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download } from 'lucide-react';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { to: '/payday', icon: Wallet, label: 'Pay Day' },
   { to: '/goals', icon: Target, label: 'Goals & Levers' },
   { to: '/projections', icon: TrendingUp, label: 'Projections' },
+  { to: '/statements', icon: CreditCard, label: 'Import Statement' },
   { to: '/advice', icon: Brain, label: 'Claude Advice' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];

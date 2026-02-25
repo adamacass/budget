@@ -149,4 +149,104 @@ Be constructive but honest. Give specific praise where spending is disciplined a
   }
 }
 
-module.exports = { getPayDayAdvice, getNightlySummary };
+async function getAccountSweepAdvice({ user, transactionBalance, accountBalances, goals, levers, recentExpenses, upcomingExpenses, budgets, budgetScale }) {
+  const anthropic = getClient();
+  if (!anthropic) return { advice: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
+
+  const goalsText = goals.map(g => `- ${g.name}: $${g.current_amount.toFixed(0)}/$${g.target_amount.toFixed(0)} (priority ${g.priority}${g.target_date ? ', target: ' + g.target_date : ''})`).join('\n');
+  const leversText = levers.map(l => `- ${l.name}: ${l.lever_type === 'percentage' ? l.value + '%' : '$' + l.value}`).join('\n');
+  const expensesText = recentExpenses.slice(0, 20).map(e => `- ${e.category}: $${e.amount} (${e.description || 'no desc'}) on ${e.expense_date}`).join('\n');
+  const upcomingText = upcomingExpenses.length > 0
+    ? upcomingExpenses.map(e => `- ${e.description}: ~$${e.estimated_amount} expected ${e.expected_date}${e.notes ? ' (' + e.notes + ')' : ''}`).join('\n')
+    : 'None flagged';
+
+  const budgetText = budgets.map(b => `- ${b.category}: $${Math.round(b.monthly_amount * budgetScale)}/mo`).join('\n');
+  const totalBudget = budgets.reduce((s, b) => s + b.monthly_amount * budgetScale, 0);
+
+  // Calculate how much of monthly budget cycle has been spent
+  const now = new Date();
+  const dayOfMonth = now.getDate();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const monthProgress = dayOfMonth / daysInMonth;
+
+  // Sum recent expenses by category for this calendar month
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const thisMonthExpenses = recentExpenses.filter(e => e.expense_date >= monthStart);
+  const spentByCategory = {};
+  thisMonthExpenses.forEach(e => {
+    if (!spentByCategory[e.category]) spentByCategory[e.category] = 0;
+    spentByCategory[e.category] += e.amount;
+  });
+  const spentText = Object.entries(spentByCategory)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cat, amt]) => `- ${cat}: $${amt.toFixed(2)} spent so far`)
+    .join('\n');
+  const totalSpentThisMonth = Object.values(spentByCategory).reduce((s, v) => s + v, 0);
+
+  const prompt = `You are a household financial advisor for a couple in Sydney, Australia. Be direct, specific, and actionable.
+
+CONTEXT:
+- User: ${user.display_name} (${user.pay_cycle} pay cycle, $${user.gross_income.toLocaleString()} gross p.a.)
+- Current amount sitting in transaction account: $${transactionBalance.toFixed(2)}
+- This is NOT a pay day — we're reviewing what's in the transaction account and deciding what to do with it.
+
+ACCOUNT BALANCES:
+- Transaction account: $${transactionBalance.toFixed(2)} (this is what we're deciding about)
+- Personal savings: $${(accountBalances.savings || 0).toFixed(2)}
+- Offset account: $${(accountBalances.offset || 0).toFixed(2)} (on mortgage)
+- Credit card owing: $${(accountBalances.credit_card || 0).toFixed(2)}
+- Investment account: $${(accountBalances.investment || 0).toFixed(2)}
+
+MONTHLY MORTGAGE: $4,587.83
+
+HOUSEHOLD BUDGET (monthly, scaled at ${Math.round(budgetScale * 100)}%):
+${budgetText}
+Total monthly budget: $${Math.round(totalBudget)}
+
+THIS MONTH'S SPENDING SO FAR (${Math.round(monthProgress * 100)}% through the month):
+${spentText || 'Nothing recorded yet'}
+Total spent this month: $${totalSpentThisMonth.toFixed(2)}
+Remaining budget this month: $${Math.round(totalBudget - totalSpentThisMonth)}
+
+SAVINGS GOALS:
+${goalsText || 'None set'}
+
+ALLOCATION LEVERS (user-set preferences):
+${leversText || 'None set'}
+
+RECENT EXPENSES (last 2 weeks):
+${expensesText || 'None recorded'}
+
+UPCOMING BULGE EXPENSES:
+${upcomingText}
+
+INSTRUCTIONS:
+1. Look at the $${transactionBalance.toFixed(2)} in the transaction account
+2. Work out how much needs to stay to cover remaining budgeted expenses for this month (~$${Math.round(totalBudget - totalSpentThisMonth)} remaining in budget, but only ${Math.round((1 - monthProgress) * 100)}% of the month left)
+3. If there's credit card debt, recommend paying that first
+4. Whatever is surplus above what's needed for expenses, recommend how to split it across offset/savings/investment per the levers
+5. Factor in any upcoming bulge expenses
+6. Be specific: "Keep $X in transaction for expenses, transfer $X to [account]"
+7. Flag if the transaction balance is low relative to remaining monthly expenses
+
+Provide your response as:
+1. RECOMMENDATION — what to do with the $${transactionBalance.toFixed(2)}
+2. KEEP IN TRANSACTION — how much to leave for upcoming expenses and why
+3. SWEEP PLAN — exact dollar amounts to transfer to each account
+4. RATIONALE — brief explanation
+5. WATCHOUTS — any concerns`;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    return { advice: message.content[0].text };
+  } catch (err) {
+    console.error('Claude API error:', err.message);
+    return { advice: `Claude API error: ${err.message}. Check your API key.` };
+  }
+}
+
+module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice };

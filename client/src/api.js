@@ -79,8 +79,13 @@ export const resolveUpcomingExpense = (id) => apiFetch(`/api/upcoming-expenses/$
 
 // Claude AI
 export const getPayDayAdvice = (data) => apiFetch('/api/claude/payday-advice', { method: 'POST', body: JSON.stringify(data) });
+export const getAccountSweepAdvice = (data) => apiFetch('/api/claude/account-sweep', { method: 'POST', body: JSON.stringify(data) });
 export const getNightlySummary = () => apiFetch('/api/claude/nightly-summary', { method: 'POST' });
 export const getLatestAdvice = (type) => apiFetch(`/api/claude/latest-advice?type=${type}`);
+
+// Statement Import
+export const parseStatement = (csv_text) => apiFetch('/api/statements/parse', { method: 'POST', body: JSON.stringify({ csv_text }) });
+export const importStatement = (transactions) => apiFetch('/api/statements/import', { method: 'POST', body: JSON.stringify({ transactions }) });
 
 // Projections
 export const getProjections = () => apiFetch('/api/projections');

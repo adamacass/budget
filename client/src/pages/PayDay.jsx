@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { addIncome, getBalances, getPayDayAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, addAllocations } from '../api';
-import { Wallet, AlertTriangle, CheckCircle, Plus, X } from 'lucide-react';
+import { addIncome, getBalances, getPayDayAdvice, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, addAllocations } from '../api';
+import { Wallet, AlertTriangle, CheckCircle, Plus, X, ArrowRightLeft } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 export default function PayDay() {
   const { user } = useAuth();
+  const [mode, setMode] = useState('payday'); // 'payday' or 'sweep'
   const [step, setStep] = useState(1);
   const [netPay, setNetPay] = useState('');
   const [grossPay, setGrossPay] = useState('');
@@ -21,6 +22,8 @@ export default function PayDay() {
   const [upcomingForm, setUpcomingForm] = useState({ description: '', estimated_amount: '', expected_date: '', category: '', notes: '' });
   const [allocations, setAllocations] = useState([]);
   const [saved, setSaved] = useState(false);
+  // Account Sweep state
+  const [txnBalance, setTxnBalance] = useState('');
 
   useEffect(() => {
     getBalances().then(setBalances).catch(console.error);
@@ -116,14 +119,60 @@ export default function PayDay() {
     setUpcoming(prev => prev.filter(u => u.id !== id));
   }
 
+  async function handleSweepAdvice() {
+    setAdviceLoading(true);
+    try {
+      const result = await getAccountSweepAdvice({ transaction_balance: parseFloat(txnBalance) });
+      setAdvice(result.advice);
+      // Parse suggested allocations from advice
+      const lines = result.advice.split('\n');
+      const allocs = [];
+      const accounts = ['offset', 'savings', 'credit_card', 'investment'];
+      for (const line of lines) {
+        for (const acct of accounts) {
+          const regex = new RegExp(`\\$([\\d,]+(?:\\.\\d{2})?).*${acct.replace('_', '[\\s_]')}|${acct.replace('_', '[\\s_]')}.*\\$([\\d,]+(?:\\.\\d{2})?)`, 'i');
+          const match = line.match(regex);
+          if (match) {
+            const amt = parseFloat((match[1] || match[2]).replace(/,/g, ''));
+            if (amt > 0 && !allocs.find(a => a.target_account === acct)) {
+              allocs.push({ target_account: acct, amount: amt, notes: 'Account sweep' });
+            }
+          }
+        }
+      }
+      if (allocs.length > 0) setAllocations(allocs);
+      setStep(3);
+    } catch (err) { alert(err.message); }
+    setAdviceLoading(false);
+  }
+
+  function handleModeSwitch(newMode) {
+    setMode(newMode);
+    setStep(1);
+    setAdvice(null);
+    setAllocations([]);
+    setSaved(false);
+  }
+
   return (
     <div>
       <div className="page-header">
-        <h2>Pay Day</h2>
-        <p>Record your pay and get AI-powered allocation guidance</p>
+        <h2>{mode === 'payday' ? 'Pay Day' : 'Account Sweep'}</h2>
+        <p>{mode === 'payday' ? 'Record your pay and get AI-powered allocation guidance' : 'Check your transaction account balance against the household budget'}</p>
+      </div>
+
+      {/* Mode toggle */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+        <button className={`btn ${mode === 'payday' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => handleModeSwitch('payday')}>
+          <Wallet size={16} /> I Got Paid
+        </button>
+        <button className={`btn ${mode === 'sweep' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => handleModeSwitch('sweep')}>
+          <ArrowRightLeft size={16} /> Sweep My Account
+        </button>
       </div>
 
       {/* Step indicator */}
+      {mode === 'payday' && (
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
         {[1, 2, 3].map(s => (
           <div key={s} style={{
@@ -142,9 +191,219 @@ export default function PayDay() {
           </div>
         ))}
       </div>
+      )}
+
+      {mode === 'sweep' && (
+      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+        {[1, 2, 3].map(s => (
+          <div key={s} style={{
+            display: 'flex', alignItems: 'center', gap: '0.5rem',
+            color: step >= s ? 'var(--accent)' : 'var(--text-muted)',
+            fontWeight: step === s ? 700 : 400, fontSize: '0.85rem'
+          }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: step > s ? 'var(--green)' : step === s ? 'var(--accent)' : 'var(--bg-input)',
+              color: step >= s ? '#fff' : 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700
+            }}>
+              {step > s ? <CheckCircle size={16} /> : s}
+            </div>
+            {s === 1 ? 'Enter Balance' : s === 2 ? 'Review & Foreshadow' : 'Sweep Funds'}
+          </div>
+        ))}
+      </div>
+      )}
+
+      {/* ==================== ACCOUNT SWEEP MODE ==================== */}
+      {mode === 'sweep' && step === 1 && (
+        <div className="card">
+          <div className="card-title">What's In Your Transaction Account?</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Enter the current balance sitting in your everyday transaction account. Claude will check it against the household budget
+            and recommend what to keep for expenses vs. what to sweep into offset/savings/investments.
+          </p>
+          <div className="form-group">
+            <label>Transaction Account Balance ($)</label>
+            <input className="form-input" type="number" step="0.01" value={txnBalance}
+              onChange={e => setTxnBalance(e.target.value)} placeholder="e.g. 3500.00"
+              style={{ maxWidth: 300 }} />
+          </div>
+          <button className="btn btn-primary" onClick={() => setStep(2)} disabled={!txnBalance || parseFloat(txnBalance) <= 0}>
+            <ArrowRightLeft size={16} /> Continue
+          </button>
+        </div>
+      )}
+
+      {mode === 'sweep' && step === 2 && (
+        <div className="card">
+          <div className="card-title">Upcoming Bulge Expenses</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Any large expenses coming up? Add them so Claude can factor them in before recommending what to sweep.
+          </p>
+
+          {upcoming.length > 0 && (
+            <div className="table-wrap" style={{ marginBottom: '1rem' }}>
+              <table>
+                <thead>
+                  <tr><th>Description</th><th>Amount</th><th>Expected</th><th>Category</th><th>Notes</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {upcoming.map(u => (
+                    <tr key={u.id}>
+                      <td style={{ fontWeight: 600 }}>{u.description}</td>
+                      <td>{fmtMoney(u.estimated_amount)}</td>
+                      <td>{u.expected_date}</td>
+                      <td><span className="tag tag-yellow">{u.category || '-'}</span></td>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{u.notes || '-'}</td>
+                      <td>
+                        <button className="btn btn-ghost btn-sm" onClick={() => handleResolveUpcoming(u.id)} title="Mark resolved">
+                          <CheckCircle size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {showAddUpcoming ? (
+            <form onSubmit={handleAddUpcoming} style={{ background: 'var(--bg-input)', padding: '1rem', borderRadius: 8, marginBottom: '1rem' }}>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>What's coming up?</label>
+                  <input className="form-input" value={upcomingForm.description}
+                    onChange={e => setUpcomingForm({ ...upcomingForm, description: e.target.value })} required placeholder="e.g. Car rego, dental work" />
+                </div>
+                <div className="form-group">
+                  <label>Estimated Cost ($)</label>
+                  <input className="form-input" type="number" step="0.01" value={upcomingForm.estimated_amount}
+                    onChange={e => setUpcomingForm({ ...upcomingForm, estimated_amount: e.target.value })} required />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Expected Date</label>
+                  <input className="form-input" type="date" value={upcomingForm.expected_date}
+                    onChange={e => setUpcomingForm({ ...upcomingForm, expected_date: e.target.value })} required />
+                </div>
+                <div className="form-group">
+                  <label>Category</label>
+                  <input className="form-input" value={upcomingForm.category}
+                    onChange={e => setUpcomingForm({ ...upcomingForm, category: e.target.value })} placeholder="e.g. Car, Medical" />
+                </div>
+              </div>
+              <div className="form-group">
+                <label>Notes</label>
+                <input className="form-input" value={upcomingForm.notes}
+                  onChange={e => setUpcomingForm({ ...upcomingForm, notes: e.target.value })} placeholder="Any extra context for Claude" />
+              </div>
+              <div className="btn-group">
+                <button className="btn btn-primary" type="submit"><Plus size={14} /> Add</button>
+                <button className="btn btn-ghost" type="button" onClick={() => setShowAddUpcoming(false)}><X size={14} /> Cancel</button>
+              </div>
+            </form>
+          ) : (
+            <button className="btn btn-ghost" onClick={() => setShowAddUpcoming(true)} style={{ marginBottom: '1rem' }}>
+              <Plus size={14} /> Add Upcoming Expense
+            </button>
+          )}
+
+          <div className="btn-group">
+            <button className="btn btn-primary" onClick={handleSweepAdvice} disabled={adviceLoading}>
+              {adviceLoading ? <><div className="spinner" /> Analysing your account...</> : 'Get Sweep Recommendation'}
+            </button>
+            <button className="btn btn-ghost" onClick={() => setStep(1)}>Back</button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'sweep' && step === 3 && (
+        <div>
+          {advice && (
+            <div className="advice-box">
+              <h3>Claude's Sweep Recommendation</h3>
+              {advice}
+            </div>
+          )}
+
+          <div className="card">
+            <div className="card-title">Sweep Allocations</div>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+              Confirm or adjust the amounts to sweep from your transaction account ({fmtMoney(parseFloat(txnBalance))}).
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {['offset', 'savings', 'credit_card', 'investment'].map(acct => {
+                const existing = allocations.find(a => a.target_account === acct);
+                return (
+                  <div key={acct} style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <div style={{ width: 140, fontWeight: 600, fontSize: '0.85rem', textTransform: 'capitalize' }}>
+                      {acct.replace('_', ' ')}
+                    </div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', width: 120 }}>
+                      Current: {fmtMoney(balances[acct])}
+                    </div>
+                    <input className="form-input" type="number" step="0.01" style={{ width: 150 }}
+                      value={existing?.amount || ''}
+                      onChange={e => {
+                        const val = parseFloat(e.target.value) || 0;
+                        setAllocations(prev => {
+                          const copy = prev.filter(a => a.target_account !== acct);
+                          if (val > 0) copy.push({ target_account: acct, amount: val, notes: 'Account sweep' });
+                          return copy;
+                        });
+                      }}
+                      placeholder="$0.00"
+                    />
+                    <input className="form-input" style={{ flex: 1 }}
+                      value={existing?.notes || ''}
+                      onChange={e => {
+                        setAllocations(prev => prev.map(a =>
+                          a.target_account === acct ? { ...a, notes: e.target.value } : a
+                        ));
+                      }}
+                      placeholder="Notes..."
+                    />
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                Sweeping: {fmtMoney(allocations.reduce((s, a) => s + a.amount, 0))} of {fmtMoney(parseFloat(txnBalance))}
+                {' '}({allocations.reduce((s, a) => s + a.amount, 0) > parseFloat(txnBalance)
+                  ? <span style={{ color: 'var(--red)' }}>Over-allocated!</span>
+                  : <span style={{ color: 'var(--green)' }}>
+                    {fmtMoney(parseFloat(txnBalance) - allocations.reduce((s, a) => s + a.amount, 0))} stays in transaction
+                  </span>
+                })
+              </span>
+            </div>
+
+            <div className="btn-group" style={{ marginTop: '1rem' }}>
+              {saved ? (
+                <div className="success-msg" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <CheckCircle size={16} /> Sweep saved! Balances updated.
+                </div>
+              ) : (
+                <>
+                  <button className="btn btn-success" onClick={handleSaveAllocations} disabled={allocations.length === 0}>
+                    <CheckCircle size={16} /> Confirm & Sweep
+                  </button>
+                  <button className="btn btn-ghost" onClick={() => { setStep(2); setAdvice(null); }}>Back</button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== PAY DAY MODE ==================== */}
 
       {/* Step 1: Record Pay */}
-      {step === 1 && (
+      {mode === 'payday' && step === 1 && (
         <div className="card">
           <div className="card-title">I Just Got Paid!</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
@@ -191,7 +450,7 @@ export default function PayDay() {
       )}
 
       {/* Step 2: Upcoming/Bulge Expenses */}
-      {step === 2 && (
+      {mode === 'payday' && step === 2 && (
         <div className="card">
           <div className="card-title">Upcoming Bulge Expenses</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
@@ -276,7 +535,7 @@ export default function PayDay() {
       )}
 
       {/* Step 3: Claude Advice + Allocations */}
-      {step === 3 && (
+      {mode === 'payday' && step === 3 && (
         <div>
           {advice && (
             <div className="advice-box">
