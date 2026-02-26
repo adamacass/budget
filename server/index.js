@@ -20,6 +20,18 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '..', 'client', 'dist')));
 }
 
+// ===================== VERSION =====================
+
+const pkg = require('../package.json');
+const SERVER_START_TIME = new Date().toISOString();
+
+app.get('/api/version', (req, res) => {
+  res.json({
+    version: pkg.version,
+    serverStartedAt: SERVER_START_TIME,
+  });
+});
+
 // ===================== AUTH ROUTES =====================
 
 app.post('/api/auth/login', (req, res) => {
