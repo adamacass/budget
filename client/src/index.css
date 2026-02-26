@@ -131,6 +131,22 @@ a:hover { color: var(--accent-hover); }
   border-top: 1px solid var(--border);
 }
 
+.sidebar-version {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-version-time {
+  font-size: 0.6rem;
+}
+
 .sidebar-user {
   display: flex;
   align-items: center;

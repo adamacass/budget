@@ -1,8 +1,11 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard } from 'lucide-react';
 import { exportToExcel } from '../api';
+
+const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
+const buildTime = typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : null;
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
@@ -15,9 +18,30 @@ const navItems = [
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
+function formatDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' })
+    + ' ' + d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+}
+
 export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const [versionInfo, setVersionInfo] = useState({ version: appVersion, buildTime });
+
+  useEffect(() => {
+    fetch('/api/version')
+      .then(r => r.json())
+      .then(data => {
+        setVersionInfo(prev => ({
+          version: data.version || prev.version,
+          buildTime: prev.buildTime || data.serverStartedAt,
+          serverStartedAt: data.serverStartedAt,
+        }));
+      })
+      .catch(() => {});
+  }, []);
 
   return (
     <div className="app-layout">
@@ -49,6 +73,16 @@ export default function Layout() {
         </div>
 
         <div className="sidebar-footer">
+          {versionInfo.version && (
+            <div className="sidebar-version">
+              <span>v{versionInfo.version}</span>
+              {(versionInfo.buildTime || versionInfo.serverStartedAt) && (
+                <span className="sidebar-version-time">
+                  Built {formatDateTime(versionInfo.buildTime || versionInfo.serverStartedAt)}
+                </span>
+              )}
+            </div>
+          )}
           <div className="sidebar-user">
             <div className="sidebar-user-avatar">
               {(user?.display_name || user?.username || '?')[0].toUpperCase()}
