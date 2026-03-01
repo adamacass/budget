@@ -207,7 +207,7 @@ function initSchema() {
 function autoCategorizeTxn(desc) {
   const d = desc.toLowerCase();
   if (/woolworths|coles|aldi|iga|harris farm|market|grocer|fruit|butcher|bakers delight|pasture/.test(d)) return 'Groceries';
-  if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch|sushi|thai|greek|chinese|banh mi|crepe|roast|grill|souvla|rooster|boost juice/.test(d)) return 'Dining Out';
+  if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch|sushi|thai|greek|chinese|banh mi|crepe|roast|grill|souvla|rooster|boost juice|rowers|cellars|liquorland|surf club|canteen|noodles|janus bar|artistry garden/.test(d)) return 'Dining Out';
   if (/uber|lyft|taxi|cabcharge|opal|linkt|toll|parking|fuel|petrol|bp\s|shell|caltex|ampol|7-?eleven|rego|rms|nrma|car\s?wash|transportfornsw|taxipay|syd aprt|carp50/.test(d)) return 'Transport';
   if (/energy|water|gas|telstra|optus|vodafone|tpg|iinet|internet|broadband|electricity|ausgrid|origin|agl|sydney water|bpay.*water/.test(d)) return 'Utilities';
   if (/insurance|allianz|qbe|suncorp|nib|medibank|bupa|hcf|ahm/.test(d)) return 'Insurance';
@@ -217,7 +217,7 @@ function autoCategorizeTxn(desc) {
   if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe|universal store|rebel|institchu|mens biz/.test(d)) return 'Clothing';
   if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav/.test(d)) return 'Personal Care';
   if (/pet|vet|petbarn|petsmart|pet circle|animal/.test(d)) return 'Pets';
-  if (/gift|flower|present|hamper|salvation army/.test(d)) return 'Gifts';
+  if (/gift|flower|present|hamper|salvation army|gofundme/.test(d)) return 'Gifts';
   if (/course|book|udemy|education|tutor|uni|school|tafe|dymocks/.test(d)) return 'Education';
   if (/bunnings|ikea|officeworks|furniture|homeware|hardware|garden|plumb|electr|temple.*webster|mocka|ruggable|bed bath|kogan|supercheap auto|chuck trailer/.test(d)) return 'Home';
   if (/international transaction fee/.test(d)) return 'Other';
@@ -486,6 +486,52 @@ function seedStatementData() {
     ['16/02/26', 'Netoo Store Pty Ltd Sydney NSW', 7.14],
     ['14/02/26', 'Taxipay Australia Mascot NSW', 52.50],
     ['16/02/26', "Sq *Capp Espresso O'Co Sydney Ns", 7.09],
+    // Feb 17-21 2026
+    ['17/02/26', 'Iga Plus Liquor Quay Quarter Sydney', 11.41],
+    ['17/02/26', 'Cafe Clutz Clayton Utz Sydney', 8.00],
+    ['17/02/26', 'Fairfax Subscriptions Pyrmont Aus', 64.99],
+    ['17/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['17/02/26', 'Interest Charged', 31.13],
+    ['18/02/26', 'Netoo Store Pty Ltd Sydney NSW', 4.08],
+    ['18/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['18/02/26', 'Dbs*Fitness First Pitt Sydney NSW', 42.99],
+    ['19/02/26', 'Skittle Lane Circular Quay Sydney', 6.59],
+    ['19/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['19/02/26', 'Mosman Rowers Mosman NSW', 12.13],
+    ['19/02/26', 'Mosman Rowers Mosman NSW', 28.31],
+    ['19/02/26', 'Netoo Store Pty Ltd Sydney NSW', 8.17],
+    ['20/02/26', 'Amazon Au Marketplace Sydney Aus', 27.99],
+    ['20/02/26', 'Vintage Cellars Neutral Bay Junction', 66.00],
+    ['20/02/26', 'Coles Neutral Bay Grosvenor St', 62.35],
+    ['20/02/26', 'Amazon Au Marketplace Sydney Aus', 62.99],
+    ['20/02/26', 'Transportfornsw Tap Sydney Aus', 5.90],
+    ['21/02/26', 'Aldi Mosman Mosman NSW', 11.92],
+    ['21/02/26', 'International Transaction Fee', 0.39],
+    ['21/02/26', 'Readtheclassics London Eng', 11.00],
+    ['21/02/26', 'Harris Farm Markets Bridgepoint', 139.83],
+    ['21/02/26', 'Chambers Cellars Mosman NSW', 23.99],
+    // Feb 22-27 2026
+    ['22/02/26', 'Noahpinion San Francisco Ca', 16.00],
+    ['22/02/26', 'Skittle Lane Circular Quay Sydney', 6.59],
+    ['22/02/26', 'International Transaction Fee', 0.56],
+    ['23/02/26', 'Artistry Garden Sydney NSW', 5.07],
+    ['24/02/26', 'Netoo Store Pty Ltd Sydney NSW', 12.76],
+    ['24/02/26', 'International Transaction Fee', 1.37],
+    ['24/02/26', 'Square Sydney Aus', 5.58],
+    ['24/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['24/02/26', 'Anthropic San Francisco Ca', 39.03],
+    ['24/02/26', 'GoFundMe San Diego Ca', 100.00],
+    ['24/02/26', 'Netoo Store Pty Ltd Sydney NSW', 9.19],
+    ['25/02/26', 'Dbs*Fitness First Pitt Sydney NSW', 42.99],
+    ['25/02/26', 'Iga Plus Liquor Quay Quarter Sydney', 61.13],
+    ['25/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['25/02/26', 'Cafe Clutz Clayton Utz Sydney', 6.00],
+    ['26/02/26', 'Netoo Store Pty Ltd Sydney NSW', 11.22],
+    ['26/02/26', 'Transportfornsw Tap Sydney Aus', 14.70],
+    ['26/02/26', 'CBD Noodles Sydney NSW', 19.73],
+    ['26/02/26', 'Cafe Clutz Clayton Utz Sydney', 2.80],
+    ['26/02/26', 'Janus Bar Sydney NSW', 5.28],
+    ['27/02/26', 'This Way Canteen Sydney NSW', 16.48],
   ];
 
   function parseDate(dateStr) {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getDashboard, getInsights, getLatestAdvice, addExpense } from '../api';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
-import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, Clock, ArrowUpRight } from 'lucide-react';
+import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight } from 'lucide-react';
 
 const COLORS = ['#6c5ce7', '#00cec9', '#ff6b6b', '#feca57', '#54a0ff', '#a29bfe', '#fd79a8', '#55efc4', '#fab1a0', '#74b9ff'];
 const CATEGORIES = [
@@ -49,7 +49,6 @@ export default function Dashboard() {
       setAddedMsg(`${category} ${fmtMoney2(parseFloat(amount))}`);
       setAmount(''); setDescription('');
       setTimeout(() => setAddedMsg(''), 3000);
-      // Reload data
       Promise.all([getDashboard(), getInsights()])
         .then(([d, i]) => { setData(d); setInsights(i); });
       amountRef.current?.focus();
@@ -66,7 +65,6 @@ export default function Dashboard() {
   const budgetedExpenses = data.budgeted_expenses || 0;
   const expenseDiff = budgetedExpenses - data.monthly_expenses;
 
-  // Budget comparison
   const budgetComparison = (data.budget_by_category || []).map(b => {
     const expRow = data.expenses_by_category.find(e => e.category === b.category);
     return {
@@ -80,8 +78,53 @@ export default function Dashboard() {
   const pacePercent = pace && pace.monthly_budget > 0 ? Math.round((pace.projected_monthly / pace.monthly_budget) * 100) : 0;
   const offsetIns = insights?.offset_insights;
 
+  // Weekly trend summary numbers
+  const thisWeek = data.weekly_trend?.[data.weekly_trend.length - 1]?.total || 0;
+  const lastWeek = data.weekly_trend?.[data.weekly_trend.length - 2]?.total || 0;
+  const weekChange = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : 0;
+
   return (
     <div>
+      {/* ===== COMPACT WEEKLY OVERVIEW (top bar) ===== */}
+      <div className="week-overview">
+        <div className="week-overview-chart">
+          <ResponsiveContainer width="100%" height={80}>
+            <BarChart data={data.weekly_trend} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+              <XAxis dataKey="week" tick={{ fill: '#8b8fa3', fontSize: 10 }} axisLine={false} tickLine={false} />
+              <YAxis hide />
+              <Tooltip
+                contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8, fontSize: '0.8rem' }}
+                formatter={(v) => [fmtMoney(v), 'Spent']}
+              />
+              {data.weekly_budget > 0 && (
+                <ReferenceLine y={data.weekly_budget} stroke="#00cec9" strokeDasharray="3 3" strokeWidth={1} />
+              )}
+              <Bar dataKey="total" fill="#6c5ce7" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="week-overview-stats">
+          <div className="week-stat">
+            <span className="week-stat-label">This Week</span>
+            <span className="week-stat-value">{fmtMoney(thisWeek)}</span>
+          </div>
+          <div className="week-stat">
+            <span className="week-stat-label">Last Week</span>
+            <span className="week-stat-value" style={{ color: 'var(--text-muted)' }}>{fmtMoney(lastWeek)}</span>
+          </div>
+          <div className="week-stat">
+            <span className="week-stat-label">Change</span>
+            <span className="week-stat-value" style={{ color: weekChange <= 0 ? 'var(--green)' : 'var(--red)' }}>
+              {weekChange > 0 ? '+' : ''}{weekChange}%
+            </span>
+          </div>
+          <div className="week-stat">
+            <span className="week-stat-label">Budget/wk</span>
+            <span className="week-stat-value" style={{ color: 'var(--blue)' }}>{fmtMoney(data.weekly_budget)}</span>
+          </div>
+        </div>
+      </div>
+
       {/* ===== QUICK ADD EXPENSE ===== */}
       <div className="quick-add-card">
         <form onSubmit={handleQuickAdd} className="quick-add-form">
@@ -120,7 +163,6 @@ export default function Dashboard() {
 
       {/* ===== HOUSEHOLD PULSE + SPENDING PACE ===== */}
       <div className="grid-2" style={{ marginBottom: '1rem' }}>
-        {/* Household Pulse */}
         <div className="card pulse-card">
           <div className="card-title"><Users size={14} /> Household Pulse</div>
           {insights?.user_activity?.map(u => {
@@ -154,17 +196,14 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Spending Pace */}
         <div className="card">
           <div className="card-title"><Zap size={14} /> Spending Pace</div>
           {pace && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.75rem' }}>
-                <div>
-                  <span style={{ fontSize: '1.5rem', fontWeight: 700, color: pacePercent > 110 ? 'var(--red)' : pacePercent > 90 ? 'var(--yellow)' : 'var(--green)' }}>
-                    {fmtMoney(pace.daily_average)}/day
-                  </span>
-                </div>
+                <span style={{ fontSize: '1.5rem', fontWeight: 700, color: pacePercent > 110 ? 'var(--red)' : pacePercent > 90 ? 'var(--yellow)' : 'var(--green)' }}>
+                  {fmtMoney(pace.daily_average)}/day
+                </span>
                 <div style={{ textAlign: 'right', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                   Projected: {fmtMoney(pace.projected_monthly)}/mo<br />
                   Budget: {fmtMoney(pace.monthly_budget)}/mo
@@ -177,9 +216,7 @@ export default function Dashboard() {
               <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
                 <span>{fmtMoney(pace.total_spent)} spent in {pace.days_elapsed} days</span>
                 <span style={{ fontWeight: 600, color: pacePercent <= 100 ? 'var(--green)' : 'var(--red)' }}>
-                  {pacePercent <= 100
-                    ? `${100 - pacePercent}% under budget`
-                    : `${pacePercent - 100}% over budget`}
+                  {pacePercent <= 100 ? `${100 - pacePercent}% under budget` : `${pacePercent - 100}% over budget`}
                 </span>
               </div>
             </>
@@ -191,9 +228,7 @@ export default function Dashboard() {
       <div className="stat-grid">
         <div className="stat-card">
           <div className="stat-label">Monthly Income</div>
-          <div className={`stat-value ${data.monthly_income > 0 ? 'positive' : 'neutral'}`}>
-            {fmtMoney(data.monthly_income)}
-          </div>
+          <div className={`stat-value ${data.monthly_income > 0 ? 'positive' : 'neutral'}`}>{fmtMoney(data.monthly_income)}</div>
           <div className="card-sub">{estimatedIncome > 0 ? `Expected: ${fmtMoney(estimatedIncome)}` : 'Combined take-home'}</div>
         </div>
         <div className="stat-card">
@@ -211,7 +246,6 @@ export default function Dashboard() {
         <div className="stat-card">
           <div className="stat-label">Mortgage</div>
           <div className="stat-value warning">{fmtMoney(data.mortgage_monthly)}</div>
-          <div className="card-sub">Monthly repayment</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Net Position</div>
@@ -222,7 +256,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ===== OFFSET ACCOUNT INSIGHTS ===== */}
+      {/* ===== OFFSET ACCOUNT ===== */}
       {offsetIns && (
         <div className="card offset-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
@@ -232,79 +266,71 @@ export default function Dashboard() {
             </div>
             <div className="offset-stats">
               <div className="offset-stat">
-                <span className="offset-stat-label">Interest Saved/mo</span>
+                <span className="offset-stat-label">Saved/mo</span>
                 <span className="offset-stat-value">{fmtMoney(offsetIns.monthly_interest_saved)}</span>
               </div>
               <div className="offset-stat">
-                <span className="offset-stat-label">Interest Saved/yr</span>
+                <span className="offset-stat-label">Saved/yr</span>
                 <span className="offset-stat-value">{fmtMoney(offsetIns.annual_interest_saved)}</span>
               </div>
               <div className="offset-stat">
-                <span className="offset-stat-label">Mortgage Rate</span>
+                <span className="offset-stat-label">Rate</span>
                 <span className="offset-stat-value">{(offsetIns.mortgage_rate * 100).toFixed(1)}%</span>
               </div>
             </div>
           </div>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-            <ArrowUpRight size={12} style={{ verticalAlign: 'middle' }} /> Every $10,000 extra in offset saves ~{fmtMoney(Math.round(10000 * offsetIns.mortgage_rate))}/year in interest
+            <ArrowUpRight size={12} style={{ verticalAlign: 'middle' }} /> Every $10k extra in offset saves ~{fmtMoney(Math.round(10000 * offsetIns.mortgage_rate))}/yr interest
           </div>
         </div>
       )}
 
-      {/* ===== DAILY SPENDING + CATEGORY BREAKDOWN ===== */}
+      {/* ===== DAILY SPENDING + CATEGORY ===== */}
       <div className="grid-2">
         <div className="card">
           <div className="card-title">Daily Spending (14 days)</div>
           {insights?.daily_spending && (
-            <ResponsiveContainer width="100%" height={180}>
+            <ResponsiveContainer width="100%" height={160}>
               <AreaChart data={insights.daily_spending}>
-                <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 11 }} />
-                <YAxis tick={{ fill: '#8b8fa3', fontSize: 11 }} />
-                <Tooltip
-                  contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
-                  formatter={(v) => [fmtMoney(v), 'Spent']}
-                />
+                <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+                <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+                <Tooltip contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
+                  formatter={(v) => [fmtMoney(v), 'Spent']} />
                 <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           )}
         </div>
-
         <div className="card">
-          <div className="card-title">Spending by Category</div>
+          <div className="card-title">By Category</div>
           {data.expenses_by_category.length > 0 ? (
-            <ResponsiveContainer width="100%" height={180}>
+            <ResponsiveContainer width="100%" height={160}>
               <PieChart>
                 <Pie data={data.expenses_by_category} dataKey="total" nameKey="category"
-                  cx="50%" cy="50%" outerRadius={70}
+                  cx="50%" cy="50%" outerRadius={60}
                   label={({ category, total }) => `${category}: $${total.toFixed(0)}`}>
-                  {data.expenses_by_category.map((_, i) => (
-                    <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                  ))}
+                  {data.expenses_by_category.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                 </Pie>
                 <Tooltip formatter={(v) => '$' + v.toFixed(0)} />
               </PieChart>
             </ResponsiveContainer>
-          ) : (
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No expenses recorded yet.</p>
-          )}
+          ) : <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No expenses yet.</p>}
         </div>
       </div>
 
-      {/* ===== BUDGET TRACKER WITH PROGRESS BARS ===== */}
+      {/* ===== BUDGET TRACKER ===== */}
       {budgetComparison.length > 0 && (
         <div className="card">
           <div className="card-title">Budget Tracker</div>
           <div className="budget-bars">
             {budgetComparison.map(b => {
               const pct = b.budget > 0 ? (b.actual / b.budget) * 100 : 0;
-              const over = b.actual > b.budget;
               return (
                 <div key={b.category} className="budget-bar-row">
                   <div className="budget-bar-label">
                     <span>{b.category}</span>
                     <span>
-                      <strong style={{ color: over ? 'var(--red)' : 'var(--text)' }}>{fmtMoney(b.actual)}</strong>
+                      <strong style={{ color: b.actual > b.budget ? 'var(--red)' : 'var(--text)' }}>{fmtMoney(b.actual)}</strong>
                       <span style={{ color: 'var(--text-muted)' }}> / {fmtMoney(b.budget)}</span>
                     </span>
                   </div>
@@ -319,46 +345,23 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ===== BIGGEST SPENDS + WEEKLY TREND ===== */}
-      <div className="grid-2">
-        <div className="card">
-          <div className="card-title">Biggest Spends (30 days)</div>
-          {insights?.biggest_expenses?.map((e, i) => (
-            <div key={i} className="big-spend-row">
-              <div className="big-spend-rank">#{i + 1}</div>
-              <div className="big-spend-info">
-                <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{e.description || e.category}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                  {e.category} · {e.expense_date} · {e.user_name}
-                </div>
-              </div>
-              <div className="big-spend-amount">{fmtMoney(e.amount)}</div>
+      {/* ===== BIGGEST SPENDS ===== */}
+      <div className="card">
+        <div className="card-title">Biggest Spends (30 days)</div>
+        {insights?.biggest_expenses?.map((e, i) => (
+          <div key={i} className="big-spend-row">
+            <div className="big-spend-rank">#{i + 1}</div>
+            <div className="big-spend-info">
+              <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{e.description || e.category}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{e.category} · {e.expense_date} · {e.user_name}</div>
             </div>
-          ))}
-        </div>
-
-        <div className="card">
-          <div className="card-title">Weekly Spending Trend</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={data.weekly_trend}>
-              <XAxis dataKey="week" tick={{ fill: '#8b8fa3', fontSize: 12 }} />
-              <YAxis tick={{ fill: '#8b8fa3', fontSize: 12 }} />
-              <Tooltip
-                contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
-                formatter={(v) => ['$' + v.toFixed(0), 'Spent']}
-              />
-              {data.weekly_budget > 0 && (
-                <ReferenceLine y={data.weekly_budget} stroke="#00cec9" strokeDasharray="5 5" strokeWidth={2}
-                  label={{ value: `Budget $${data.weekly_budget}`, position: 'right', fill: '#00cec9', fontSize: 10 }} />
-              )}
-              <Bar dataKey="total" fill="#6c5ce7" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+            <div className="big-spend-amount">{fmtMoney(e.amount)}</div>
+          </div>
+        ))}
       </div>
 
       {/* ===== SAVINGS GOALS ===== */}
-      {data.goals && data.goals.length > 0 && (
+      {data.goals?.length > 0 && (
         <div className="card">
           <div className="card-title">Savings Goals</div>
           {data.goals.map(g => {
@@ -370,8 +373,7 @@ export default function Dashboard() {
                   <span style={{ color: 'var(--text-muted)' }}>{fmtMoney(g.current_amount)} / {fmtMoney(g.target_amount)} ({pct.toFixed(0)}%)</span>
                 </div>
                 <div className="progress-bar">
-                  <div className={`progress-fill ${pct >= 75 ? 'green' : pct >= 40 ? 'yellow' : ''}`}
-                    style={{ width: `${pct}%` }} />
+                  <div className={`progress-fill ${pct >= 75 ? 'green' : pct >= 40 ? 'yellow' : ''}`} style={{ width: `${pct}%` }} />
                 </div>
               </div>
             );
@@ -387,10 +389,7 @@ export default function Dashboard() {
         </div>
         <div className="stat-card">
           <div className="stat-label">Credit Card</div>
-          <div className={`stat-value ${data.balances.credit_card > 0 ? 'negative' : 'positive'}`}>
-            {fmtMoney(data.balances.credit_card)}
-          </div>
-          <div className="card-sub">{data.balances.credit_card > 0 ? 'Outstanding' : 'Clear'}</div>
+          <div className={`stat-value ${data.balances.credit_card > 0 ? 'negative' : 'positive'}`}>{fmtMoney(data.balances.credit_card)}</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Investments</div>
@@ -399,12 +398,10 @@ export default function Dashboard() {
         <div className="stat-card">
           <div className="stat-label">Total Assets</div>
           <div className="stat-value positive">{fmtMoney(totalAssets)}</div>
-          <div className="card-sub">Offset + Savings + Investments</div>
         </div>
       </div>
 
-      {/* Claude Advice */}
-      {advice && advice.content && (
+      {advice?.content && (
         <div className="advice-box">
           <h3>Claude's Latest Summary</h3>
           {advice.content}
