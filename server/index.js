@@ -509,26 +509,6 @@ function parseStatementDate(raw) {
   return null;
 }
 
-// Simple keyword-based auto-categorizer
-function autoCategorizeTxn(desc) {
-  const d = desc.toLowerCase();
-  if (/woolworths|coles|aldi|iga|harris farm|market|grocer|fruit|butcher/.test(d)) return 'Groceries';
-  if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch/.test(d)) return 'Dining Out';
-  if (/uber|lyft|taxi|cabcharge|opal|linkt|toll|parking|fuel|petrol|bp\s|shell|caltex|ampol|7-?eleven|rego|rms|nrma|car\s?wash/.test(d)) return 'Transport';
-  if (/energy|water|gas|telstra|optus|vodafone|tpg|iinet|internet|broadband|electricity|ausgrid|origin|agl/.test(d)) return 'Utilities';
-  if (/insurance|allianz|qbe|suncorp|nib|medibank|bupa|hcf|ahm/.test(d)) return 'Insurance';
-  if (/netflix|spotify|disney|stan|binge|kayo|apple\.com|youtube|amazon prime|subscribe|membership/.test(d)) return 'Subscriptions';
-  if (/cinema|movies|ticket|event|concert|sport|game|bowling|golf|tennis|museum|zoo|theme park|luna park/.test(d)) return 'Entertainment';
-  if (/pharmacy|chemist|doctor|gp\s|medical|dental|dentist|physio|gym|fitness|pool|yoga|pilates|health/.test(d)) return 'Health';
-  if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe/.test(d)) return 'Clothing';
-  if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav/.test(d)) return 'Personal Care';
-  if (/pet|vet|petbarn|petsmart|pet circle|animal/.test(d)) return 'Pets';
-  if (/gift|flower|present|hamper/.test(d)) return 'Gifts';
-  if (/course|book|udemy|education|tutor|uni|school|tafe/.test(d)) return 'Education';
-  if (/bunnings|ikea|officeworks|furniture|homeware|hardware|garden|plumb|electr/.test(d)) return 'Home';
-  return 'Other';
-}
-
 app.post('/api/claude/nightly-summary', authMiddleware, async (req, res) => {
   const db = getDb();
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
