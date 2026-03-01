@@ -97,6 +97,23 @@ export const importStatement = (transactions) => apiFetch('/api/statements/impor
 // Projections
 export const getProjections = () => apiFetch('/api/projections');
 
+// Backup
+export const downloadBackup = async () => {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`${API}/api/backup`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Backup failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `budget_backup_${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+export const restoreBackup = (backup) => apiFetch('/api/backup/restore', { method: 'POST', body: JSON.stringify({ backup }) });
+
 // Export
 export const exportToExcel = async (params = {}) => {
   const qs = new URLSearchParams(params).toString();

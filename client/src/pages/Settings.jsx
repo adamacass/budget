@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getBalances, updateBalance, exportToExcel } from '../api';
-import { Save, Download, Key, User, DollarSign } from 'lucide-react';
+import { getBalances, updateBalance, exportToExcel, downloadBackup, restoreBackup } from '../api';
+import { Save, Download, Key, User, DollarSign, Database, Upload } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
@@ -85,6 +85,9 @@ export default function Settings() {
         </button>
         <button className={`tab ${tab === 'export' ? 'active' : ''}`} onClick={() => setTab('export')}>
           <Download size={14} style={{ marginRight: 4 }} /> Export
+        </button>
+        <button className={`tab ${tab === 'backup' ? 'active' : ''}`} onClick={() => setTab('backup')}>
+          <Database size={14} style={{ marginRight: 4 }} /> Backup
         </button>
       </div>
 
@@ -231,6 +234,41 @@ export default function Settings() {
           <button className="btn btn-primary" onClick={() => exportToExcel(exportRange)}>
             <Download size={14} /> Download Excel
           </button>
+        </div>
+      )}
+
+      {tab === 'backup' && (
+        <div className="card">
+          <div className="card-title"><Database size={14} /> Data Backup & Restore</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Download a full JSON backup of all your data, or restore from a previous backup.
+          </p>
+          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+            <button className="btn btn-primary" onClick={async () => {
+              try { await downloadBackup(); } catch (err) { alert('Backup failed: ' + err.message); }
+            }}>
+              <Download size={14} /> Download Backup
+            </button>
+            <label className="btn btn-success" style={{ cursor: 'pointer' }}>
+              <Upload size={14} /> Restore from Backup
+              <input type="file" accept=".json" style={{ display: 'none' }} onChange={async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                try {
+                  const text = await file.text();
+                  const backup = JSON.parse(text);
+                  if (!backup.expenses) { alert('Invalid backup file'); return; }
+                  if (!confirm(`Restore ${backup.expenses.length} expenses from backup dated ${backup.exported_at || 'unknown'}? Existing data will not be overwritten.`)) return;
+                  const result = await restoreBackup(backup);
+                  alert(`Restored ${result.restored} new expenses (${result.total_in_backup} total in backup)`);
+                } catch (err) { alert('Restore failed: ' + err.message); }
+                e.target.value = '';
+              }} />
+            </label>
+          </div>
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '1rem' }}>
+            We recommend downloading a backup regularly to protect against data loss.
+          </p>
         </div>
       )}
     </div>

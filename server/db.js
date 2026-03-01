@@ -3,23 +3,44 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+// Use DATA_DIR env var if set (Render persistent disk), otherwise default to project-relative path
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'budget.db');
 
 let db;
 
+function waitForDataDir(maxWaitMs = 10000) {
+  // On Render, the persistent disk may take a moment to mount after container start.
+  // If DATA_DIR is an env-specified path, wait for it to appear before creating the DB.
+  if (!process.env.DATA_DIR) return; // local dev, no need to wait
+  const start = Date.now();
+  while (!fs.existsSync(DATA_DIR) && Date.now() - start < maxWaitMs) {
+    console.log(`Waiting for persistent disk at ${DATA_DIR}...`);
+    const waitUntil = Date.now() + 1000;
+    while (Date.now() < waitUntil) { /* busy wait 1s */ }
+  }
+  if (fs.existsSync(DATA_DIR)) {
+    console.log(`Persistent disk mounted at ${DATA_DIR}`);
+  } else {
+    console.warn(`WARNING: Persistent disk not found at ${DATA_DIR} after ${maxWaitMs}ms. Data may not persist!`);
+  }
+}
+
 function getDb() {
   if (!db) {
+    waitForDataDir();
     fs.mkdirSync(DATA_DIR, { recursive: true });
+    const isNewDb = !fs.existsSync(DB_PATH);
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
-    initSchema();
+    console.log(`Database opened at ${DB_PATH} (${isNewDb ? 'NEW' : 'existing'})`);
+    initSchema(isNewDb);
   }
   return db;
 }
 
-function initSchema() {
+function initSchema(isNewDb) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,10 +181,26 @@ function initSchema() {
     );
   `);
 
-  // Auto-seed default users if none exist
+  // Log existing data counts for diagnostics
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+  const expenseCount = db.prepare('SELECT COUNT(*) as count FROM expenses').get().count;
+  console.log(`Database status: ${userCount} users, ${expenseCount} expenses`);
+
+  // ONLY seed on a brand-new database file (not just empty tables).
+  // This prevents re-seeding after accidental data loss (e.g. disk mount issues).
+  if (!isNewDb) {
+    console.log('Existing database detected — skipping all seed operations to protect data.');
+    // Still seed category budgets if missing (they're defaults, not user data)
+    const budgetCount = db.prepare('SELECT COUNT(*) as count FROM category_budgets').get().count;
+    if (budgetCount === 0) {
+      seedCategoryBudgets();
+    }
+    return;
+  }
+
+  // Auto-seed default users if none exist (only on new DB)
   if (userCount === 0) {
-    console.log('No users found, seeding defaults...');
+    console.log('New database — seeding default users...');
     const hash1 = bcrypt.hashSync('GoPies2023', 10);
     const hash2 = bcrypt.hashSync('GoPies2023', 10);
     const insertUser = db.prepare(
@@ -190,13 +227,16 @@ function initSchema() {
     console.log('Default users seeded: adam, aruto');
   }
 
-  // Seed actual bank statement data if expenses table is empty
-  const expenseCount = db.prepare('SELECT COUNT(*) as count FROM expenses').get().count;
+  // Seed statement data only on new DB with no expenses
   if (expenseCount === 0) {
     seedStatementData();
   }
 
-  // Seed category budgets if none exist (conservative / high-savings baseline)
+  // Seed category budgets
+  seedCategoryBudgets();
+}
+
+function seedCategoryBudgets() {
   const budgetCount = db.prepare('SELECT COUNT(*) as count FROM category_budgets').get().count;
   if (budgetCount === 0) {
     const insertBudget = db.prepare('INSERT INTO category_budgets (category, monthly_amount) VALUES (?, ?)');

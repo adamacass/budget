@@ -887,6 +887,59 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
   });
 });
 
+// ===================== DATA BACKUP =====================
+
+// Full JSON backup of all data (for disaster recovery)
+app.get('/api/backup', authMiddleware, (req, res) => {
+  const db = getDb();
+  const backup = {
+    exported_at: new Date().toISOString(),
+    users: db.prepare('SELECT id, username, display_name, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle FROM users').all(),
+    expenses: db.prepare('SELECT * FROM expenses ORDER BY expense_date DESC').all(),
+    income_entries: db.prepare('SELECT * FROM income_entries ORDER BY pay_date DESC').all(),
+    fund_allocations: db.prepare('SELECT * FROM fund_allocations ORDER BY allocated_date DESC').all(),
+    savings_goals: db.prepare('SELECT * FROM savings_goals').all(),
+    levers: db.prepare('SELECT * FROM levers').all(),
+    account_balances: db.prepare('SELECT * FROM account_balances ORDER BY updated_at DESC').all(),
+    category_budgets: db.prepare('SELECT * FROM category_budgets').all(),
+    upcoming_expenses: db.prepare('SELECT * FROM upcoming_expenses').all(),
+    deleted_expenses: db.prepare('SELECT * FROM deleted_expenses').all(),
+  };
+  res.setHeader('Content-Disposition', `attachment; filename=budget_backup_${new Date().toISOString().split('T')[0]}.json`);
+  res.json(backup);
+});
+
+// Restore data from JSON backup
+app.post('/api/backup/restore', authMiddleware, (req, res) => {
+  const { backup } = req.body;
+  if (!backup || !backup.expenses) {
+    return res.status(400).json({ error: 'Invalid backup data' });
+  }
+  const db = getDb();
+
+  const restoreTransaction = db.transaction(() => {
+    // Restore expenses (skip duplicates based on description + amount + date + user_id)
+    const insertExpense = db.prepare(
+      'INSERT OR IGNORE INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    let restored = 0;
+    for (const e of backup.expenses) {
+      // Check if this expense already exists
+      const existing = db.prepare(
+        'SELECT id FROM expenses WHERE user_id = ? AND description = ? AND amount = ? AND expense_date = ?'
+      ).get(e.user_id, e.description, e.amount, e.expense_date);
+      if (!existing) {
+        insertExpense.run(e.user_id, e.category, e.subcategory || null, e.description, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range || 0, e.range_low || null, e.range_high || null, e.recurring || 0);
+        restored++;
+      }
+    }
+    return restored;
+  });
+
+  const restored = restoreTransaction();
+  res.json({ message: `Restored ${restored} expenses`, total_in_backup: backup.expenses.length });
+});
+
 // ===================== EXPORT =====================
 
 app.get('/api/export', authMiddleware, (req, res) => {
