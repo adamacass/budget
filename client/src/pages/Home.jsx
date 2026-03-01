@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
-import { Outlet, NavLink } from 'react-router-dom';
-import { LayoutDashboard, Receipt, PiggyBank, RefreshCw } from 'lucide-react';
+import { Outlet } from 'react-router-dom';
+import { RefreshCw } from 'lucide-react';
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -62,25 +62,6 @@ export default function Home() {
           )}
         </div>
       )}
-
-      {/* Main tabs */}
-      <div className="home-tabs">
-        <NavLink to="/" end className={({ isActive }) => `home-tab ${isActive ? 'active' : ''}`}>
-          <LayoutDashboard size={16} />
-          <span>Dashboard</span>
-        </NavLink>
-        <NavLink to="/expenses" className={({ isActive }) => `home-tab ${isActive ? 'active' : ''}`}>
-          <Receipt size={16} />
-          <span>Expenses</span>
-        </NavLink>
-        <NavLink to="/budget" className={({ isActive }) => `home-tab ${isActive ? 'active' : ''}`}>
-          <PiggyBank size={16} />
-          <span>Budget</span>
-        </NavLink>
-        <button className="home-tab-refresh" onClick={triggerRefresh} disabled={refreshing} title="Refresh">
-          <RefreshCw size={14} className={refreshing ? 'spinning' : ''} />
-        </button>
-      </div>
 
       {/* Page content — key forces remount on refresh */}
       <div key={refreshKey}>

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { getExpenses, getExpenseSummary, addExpense, addExpensesBatch, deleteExpense, updateExpense } from '../api';
-import { Plus, Trash2, Filter, Zap, Users, X, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { Plus, Trash2, Filter, Zap, Users, X, Check, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
 
 const CATEGORIES = [
   'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
@@ -19,15 +20,23 @@ function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFr
 function fmtShort(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
 
 export default function Expenses() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+
   const [expenses, setExpenses] = useState([]);
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [entryMode, setEntryMode] = useState('individual');
-  const [filter, setFilter] = useState('');
-  const [dateRange, setDateRange] = useState({ start: '', end: '' });
   const [period, setPeriod] = useState('week');
   const [showFilters, setShowFilters] = useState(false);
+
+  // Active filters from URL params
+  const activeCategory = searchParams.get('category') || '';
+  const activeUserId = searchParams.get('user_id') || '';
+  const activeStart = searchParams.get('start') || '';
+  const activeEnd = searchParams.get('end') || '';
+  const hasActiveFilters = activeCategory || activeUserId || activeStart || activeEnd;
 
   // Speed run state
   const [speedRunMode, setSpeedRunMode] = useState(false);
@@ -49,15 +58,17 @@ export default function Expenses() {
     }))
   );
 
-  useEffect(() => { loadExpenses(); loadSummary(); }, []);
+  useEffect(() => { loadExpenses(); }, [activeCategory, activeUserId, activeStart, activeEnd]);
+  useEffect(() => { loadSummary(); }, []);
 
   async function loadExpenses() {
     setLoading(true);
     try {
       const params = {};
-      if (dateRange.start) params.start = dateRange.start;
-      if (dateRange.end) params.end = dateRange.end;
-      if (filter) params.category = filter;
+      if (activeStart) params.start = activeStart;
+      if (activeEnd) params.end = activeEnd;
+      if (activeCategory) params.category = activeCategory;
+      if (activeUserId) params.user_id = activeUserId;
       const data = await getExpenses(params);
       setExpenses(data);
     } catch (err) { console.error(err); }
@@ -66,6 +77,33 @@ export default function Expenses() {
 
   async function loadSummary() {
     try { setSummary(await getExpenseSummary()); } catch (err) { console.error(err); }
+  }
+
+  function setFilter(key, value) {
+    const newParams = new URLSearchParams(searchParams);
+    if (value) newParams.set(key, value);
+    else newParams.delete(key);
+    setSearchParams(newParams);
+  }
+
+  function clearAllFilters() {
+    setSearchParams({});
+  }
+
+  function filterByCategory(category) {
+    if (activeCategory === category) {
+      setFilter('category', '');
+    } else {
+      setFilter('category', category);
+    }
+  }
+
+  function filterByUser(userId) {
+    if (activeUserId === String(userId)) {
+      setFilter('user_id', '');
+    } else {
+      setFilter('user_id', String(userId));
+    }
   }
 
   async function handleAddSingle(e) {
@@ -201,6 +239,35 @@ export default function Expenses() {
         </div>
       )}
 
+      {/* Active filter banner */}
+      {hasActiveFilters && (
+        <div className="active-filter-banner">
+          <ArrowLeft size={14} />
+          <span>Filtered:</span>
+          {activeCategory && (
+            <span className="filter-chip" onClick={() => setFilter('category', '')}>
+              {activeCategory} <X size={12} />
+            </span>
+          )}
+          {activeUserId && (
+            <span className="filter-chip" onClick={() => setFilter('user_id', '')}>
+              {expenses[0]?.user_name || `User ${activeUserId}`} <X size={12} />
+            </span>
+          )}
+          {activeStart && (
+            <span className="filter-chip" onClick={() => setFilter('start', '')}>
+              From {activeStart} <X size={12} />
+            </span>
+          )}
+          {activeEnd && (
+            <span className="filter-chip" onClick={() => setFilter('end', '')}>
+              To {activeEnd} <X size={12} />
+            </span>
+          )}
+          <button className="btn btn-ghost btn-sm" onClick={clearAllFilters}>Clear all</button>
+        </div>
+      )}
+
       {/* Period Toggle + Speed Run */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
         <div className="period-toggle">
@@ -228,7 +295,8 @@ export default function Expenses() {
           </div>
           <div className="stat-card">
             <div className="stat-label">Top Category</div>
-            <div className="stat-value neutral" style={{ fontSize: '1.1rem' }}>
+            <div className="stat-value neutral clickable" style={{ fontSize: '1.1rem' }}
+              onClick={() => currentPeriod.by_category?.[0] && filterByCategory(currentPeriod.by_category[0].category)}>
               {currentPeriod.by_category?.[0]?.category || '-'}
             </div>
             <div className="card-sub">{fmtShort(currentPeriod.by_category?.[0]?.total)}</div>
@@ -243,7 +311,7 @@ export default function Expenses() {
             <Users size={14} /> Adam vs Aruto — {period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : 'This Year'}
           </div>
           {currentPeriod.by_user.map((u, i) => (
-            <div key={u.user_id} className="vs-row">
+            <div key={u.user_id} className="vs-row clickable" onClick={() => filterByUser(u.user_id)}>
               <div className="vs-avatar" style={{ background: i === 0 ? 'var(--accent)' : 'var(--green)' }}>
                 {u.display_name[0]}
               </div>
@@ -282,8 +350,10 @@ export default function Expenses() {
           <div className="budget-bars">
             {currentPeriod.by_category.slice(0, 8).map(c => {
               const pct = currentPeriod.total > 0 ? (c.total / currentPeriod.total) * 100 : 0;
+              const isActive = activeCategory === c.category;
               return (
-                <div key={c.category} className="budget-bar-row">
+                <div key={c.category} className={`budget-bar-row clickable ${isActive ? 'selected' : ''}`}
+                  onClick={() => filterByCategory(c.category)}>
                   <div className="budget-bar-label">
                     <span>{c.category}</span>
                     <span>
@@ -436,21 +506,23 @@ export default function Expenses() {
         <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label>From</label>
-            <input className="form-input" type="date" value={dateRange.start} onChange={e => setDateRange({ ...dateRange, start: e.target.value })} />
+            <input className="form-input" type="date" value={activeStart}
+              onChange={e => setFilter('start', e.target.value)} />
           </div>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label>To</label>
-            <input className="form-input" type="date" value={dateRange.end} onChange={e => setDateRange({ ...dateRange, end: e.target.value })} />
+            <input className="form-input" type="date" value={activeEnd}
+              onChange={e => setFilter('end', e.target.value)} />
           </div>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label>Category</label>
-            <select className="form-select" value={filter} onChange={e => setFilter(e.target.value)}>
+            <select className="form-select" value={activeCategory}
+              onChange={e => setFilter('category', e.target.value)}>
               <option value="">All</option>
               {CATEGORIES.map(c => <option key={c}>{c}</option>)}
             </select>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={loadExpenses}><Filter size={14} /> Apply</button>
-          <button className="btn btn-ghost btn-sm" onClick={() => { setDateRange({ start: '', end: '' }); setFilter(''); setTimeout(loadExpenses, 0); }}>Clear</button>
+          <button className="btn btn-ghost btn-sm" onClick={clearAllFilters}>Clear</button>
         </div>
       )}
 
@@ -479,14 +551,18 @@ export default function Expenses() {
               <tbody>
                 {expenses.length === 0 ? (
                   <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>
-                    No expenses yet. Click "Add" to start tracking.
+                    {hasActiveFilters ? 'No expenses match the current filters.' : 'No expenses yet. Click "Add" to start tracking.'}
                   </td></tr>
                 ) : expenses.map(e => (
                   <tr key={e.id}>
                     <td>{e.expense_date}</td>
-                    <td>{e.user_name}</td>
                     <td>
-                      <span className="tag tag-blue">{e.category}</span>
+                      <span className="user-pill clickable" onClick={() => filterByUser(e.user_id)}>
+                        {e.user_name}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="tag tag-blue clickable" onClick={() => filterByCategory(e.category)}>{e.category}</span>
                       {e.subcategory && <span style={{ marginLeft: 4, fontSize: '0.75rem', color: 'var(--text-muted)' }}>{e.subcategory}</span>}
                     </td>
                     <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{e.description || '-'}</td>

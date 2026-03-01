@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getDashboard, getInsights, getLatestAdvice, addExpense, extractScreenshot, importScreenshot } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
+import { useNavigate } from 'react-router-dom';
 import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera, Upload, X, Edit3 } from 'lucide-react';
 
 const COLORS = ['#6c5ce7', '#00cec9', '#ff6b6b', '#feca57', '#54a0ff', '#a29bfe', '#fd79a8', '#55efc4', '#fab1a0', '#74b9ff'];
@@ -16,6 +17,7 @@ function fmtMoney2(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumF
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [insights, setInsights] = useState(null);
   const [advice, setAdvice] = useState(null);
@@ -306,7 +308,8 @@ export default function Dashboard() {
             const isStale = u.days_since_last > 3;
             const isActive = u.days_since_last !== null && u.days_since_last <= 1;
             return (
-              <div key={u.user_id} className="pulse-user">
+              <div key={u.user_id} className="pulse-user clickable"
+                onClick={() => navigate(`/expenses?user_id=${u.user_id}`)}>
                 <div className="pulse-avatar">{u.display_name[0]}</div>
                 <div className="pulse-info">
                   <div className="pulse-name">
@@ -463,7 +466,8 @@ export default function Dashboard() {
             {budgetComparison.map(b => {
               const pct = b.budget > 0 ? (b.actual / b.budget) * 100 : 0;
               return (
-                <div key={b.category} className="budget-bar-row">
+                <div key={b.category} className="budget-bar-row clickable"
+                  onClick={() => navigate(`/expenses?category=${encodeURIComponent(b.category)}`)}>
                   <div className="budget-bar-label">
                     <span>{b.category}</span>
                     <span>
@@ -486,7 +490,8 @@ export default function Dashboard() {
       <div className="card">
         <div className="card-title">Biggest Spends (30 days)</div>
         {insights?.biggest_expenses?.map((e, i) => (
-          <div key={i} className="big-spend-row">
+          <div key={i} className="big-spend-row clickable"
+            onClick={() => navigate(`/expenses?category=${encodeURIComponent(e.category)}`)}>
             <div className="big-spend-rank">#{i + 1}</div>
             <div className="big-spend-info">
               <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{e.description || e.category}</div>
