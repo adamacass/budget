@@ -588,6 +588,287 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   font-size: 1.1rem;
 }
 
+/* ===== Quick Add Expense ===== */
+.quick-add-card {
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.12), rgba(0, 206, 201, 0.08));
+  border: 1px solid rgba(108, 92, 231, 0.3);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.quick-add-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.quick-add-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.quick-add-select {
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  outline: none;
+  min-width: 120px;
+}
+.quick-add-select:focus { border-color: var(--accent); }
+
+.quick-add-amount {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.quick-add-dollar {
+  position: absolute;
+  left: 10px;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.9rem;
+  pointer-events: none;
+}
+.quick-add-amount input {
+  padding: 0.5rem 0.6rem 0.5rem 1.5rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  width: 110px;
+  outline: none;
+}
+.quick-add-amount input:focus { border-color: var(--accent); }
+
+.quick-add-desc {
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 120px;
+  outline: none;
+}
+.quick-add-desc:focus { border-color: var(--accent); }
+
+.quick-add-date {
+  padding: 0.5rem 0.6rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.8rem;
+  outline: none;
+  width: 130px;
+}
+.quick-add-date:focus { border-color: var(--accent); }
+
+.quick-add-btn {
+  padding: 0.5rem 1.25rem !important;
+  font-size: 0.85rem !important;
+  white-space: nowrap;
+}
+
+.quick-add-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--green);
+  font-weight: 600;
+  animation: fadeIn 0.3s;
+}
+
+.quick-add-recent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid rgba(108, 92, 231, 0.15);
+}
+
+.recent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.6rem;
+  background: var(--bg-input);
+  border-radius: 20px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.recent-pill strong { color: var(--text); }
+.recent-who {
+  color: var(--accent);
+  opacity: 0.7;
+  font-size: 0.68rem;
+}
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ===== Household Pulse ===== */
+.pulse-card { }
+
+.pulse-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.pulse-user:last-of-type { border-bottom: none; }
+
+.pulse-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.pulse-info { flex: 1; }
+
+.pulse-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pulse-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.pulse-badge-green { background: var(--green-bg); color: var(--green); }
+.pulse-badge-red { background: var(--red-bg); color: var(--red); }
+
+.pulse-stats {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.pulse-streak {
+  color: var(--yellow);
+  font-weight: 600;
+}
+
+.pulse-nudge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  background: var(--yellow-bg);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--yellow);
+  font-weight: 600;
+}
+
+/* ===== Offset Card ===== */
+.offset-card {
+  border-left: 4px solid var(--green);
+}
+
+.offset-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.offset-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.offset-stat-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 600;
+}
+
+.offset-stat-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--green);
+}
+
+/* ===== Budget Bars ===== */
+.budget-bars { }
+
+.budget-bar-row {
+  margin-bottom: 0.5rem;
+}
+
+.budget-bar-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  margin-bottom: 1px;
+}
+
+/* ===== Biggest Spends ===== */
+.big-spend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.big-spend-row:last-child { border-bottom: none; }
+
+.big-spend-rank {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  width: 24px;
+  text-align: center;
+}
+
+.big-spend-info { flex: 1; min-width: 0; }
+.big-spend-info > div:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.big-spend-amount {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--red);
+  white-space: nowrap;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .sidebar {
@@ -607,4 +888,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   .app-layout { flex-direction: column; }
   .grid-2, .grid-3, .stat-grid { grid-template-columns: 1fr; }
   .form-row { flex-direction: column; }
+  .quick-add-form { flex-direction: column; align-items: stretch; }
+  .quick-add-form > * { width: 100% !important; min-width: 0 !important; }
+  .quick-add-amount input { width: 100%; }
+  .quick-add-label { justify-content: center; margin-bottom: 0.25rem; }
+  .offset-stats { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
 }

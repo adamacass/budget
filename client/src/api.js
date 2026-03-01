@@ -31,6 +31,7 @@ export async function apiFetch(path, options = {}) {
 
 // Dashboard
 export const getDashboard = () => apiFetch('/api/dashboard');
+export const getInsights = () => apiFetch('/api/insights');
 
 // Expenses
 export const getExpenses = (params = {}) => {

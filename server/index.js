@@ -584,6 +584,101 @@ app.put('/api/budgets/:category', authMiddleware, (req, res) => {
   res.json(row);
 });
 
+// ===================== INSIGHTS (Household Pulse) =====================
+
+app.get('/api/insights', authMiddleware, (req, res) => {
+  const db = getDb();
+  const today = new Date().toISOString().split('T')[0];
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+
+  // Per-user activity
+  const users = db.prepare('SELECT id, display_name, username FROM users').all();
+  const userActivity = users.map(u => {
+    const lastExpense = db.prepare('SELECT expense_date FROM expenses WHERE user_id = ? ORDER BY expense_date DESC LIMIT 1').get(u.id);
+    const monthCount = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, thirtyDaysAgo);
+    const monthTotal = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, thirtyDaysAgo);
+
+    // Streak: consecutive days with at least one expense (allow today gap)
+    let streak = 0;
+    for (let d = 0; d < 60; d++) {
+      const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+      const has = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND expense_date = ?').get(u.id, date);
+      if (has.cnt > 0) streak++;
+      else if (d > 0) break;
+    }
+
+    const daysSince = lastExpense
+      ? Math.floor((Date.now() - new Date(lastExpense.expense_date + 'T12:00:00').getTime()) / 86400000)
+      : null;
+
+    return {
+      user_id: u.id,
+      display_name: u.display_name,
+      last_expense_date: lastExpense?.expense_date || null,
+      days_since_last: daysSince,
+      month_count: monthCount.cnt,
+      month_total: monthTotal.total || 0,
+      streak,
+    };
+  });
+
+  // Spending pace
+  const totalMonth = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ?').get(thirtyDaysAgo);
+  const daysElapsed = Math.max(1, Math.floor((Date.now() - new Date(thirtyDaysAgo + 'T00:00:00').getTime()) / 86400000));
+  const dailyAvg = (totalMonth.total || 0) / daysElapsed;
+
+  // Daily spending (last 14 days)
+  const dailySpending = [];
+  for (let d = 13; d >= 0; d--) {
+    const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    const row = db.prepare('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = ?').get(date);
+    dailySpending.push({ date: date.substring(5), total: row.total || 0, count: row.cnt });
+  }
+
+  // Top 5 biggest expenses this month
+  const biggestExpenses = db.prepare(
+    'SELECT e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date >= ? ORDER BY e.amount DESC LIMIT 5'
+  ).all(thirtyDaysAgo);
+
+  // Recent 5 expenses
+  const recentExpenses = db.prepare(
+    'SELECT e.id, e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id ORDER BY e.created_at DESC, e.id DESC LIMIT 5'
+  ).all();
+
+  // Offset interest insight
+  const offsetRow = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get('offset');
+  const offsetBal = offsetRow ? offsetRow.balance : 0;
+  const mortgageRate = 0.062;
+  const monthlyInterestSaved = (offsetBal * mortgageRate) / 12;
+  const annualInterestSaved = offsetBal * mortgageRate;
+
+  // Budget data for pace comparison
+  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
+  const monthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+
+  res.json({
+    user_activity: userActivity,
+    spending_pace: {
+      daily_average: Math.round(dailyAvg),
+      projected_monthly: Math.round(dailyAvg * 30),
+      monthly_budget: Math.round(monthlyBudget),
+      days_elapsed: daysElapsed,
+      total_spent: Math.round(totalMonth.total || 0),
+    },
+    daily_spending: dailySpending,
+    biggest_expenses: biggestExpenses,
+    recent_expenses: recentExpenses,
+    offset_insights: {
+      balance: offsetBal,
+      monthly_interest_saved: Math.round(monthlyInterestSaved),
+      annual_interest_saved: Math.round(annualInterestSaved),
+      mortgage_rate: mortgageRate,
+    },
+  });
+});
+
 // ===================== DASHBOARD / SUMMARY =====================
 
 app.get('/api/dashboard', authMiddleware, (req, res) => {
