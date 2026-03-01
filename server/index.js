@@ -20,6 +20,10 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '..', 'client', 'dist')));
 }
 
+// Initialize DB on startup
+let dbReady = false;
+getDb().then(() => { dbReady = true; console.log('DB pool ready'); }).catch(err => { console.error('DB init failed:', err); });
+
 // ===================== VERSION =====================
 
 const pkg = require('../package.json');
@@ -34,10 +38,11 @@ app.get('/api/version', (req, res) => {
 
 // ===================== AUTH ROUTES =====================
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const db = await getDb();
+  const { rows } = await db.query('SELECT * FROM users WHERE username = $1', [username]);
+  const user = rows[0];
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
@@ -57,118 +62,132 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { username, password, display_name, gross_income, pay_cycle, super_rate, hecs_repayment_rate } = req.body;
-  const db = getDb();
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+  const db = await getDb();
+  const existing = (await db.query('SELECT id FROM users WHERE username = $1', [username])).rows[0];
   if (existing) return res.status(400).json({ error: 'Username already taken' });
 
   const hash = bcrypt.hashSync(password, 10);
-  const result = db.prepare(
-    'INSERT INTO users (username, display_name, password_hash, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(username, display_name, hash, gross_income || 0, super_rate || 0.115, hecs_repayment_rate || 0, pay_cycle || 'fortnightly');
+  const result = await db.query(
+    'INSERT INTO users (username, display_name, password_hash, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+    [username, display_name, hash, gross_income || 0, super_rate || 0.115, hecs_repayment_rate || 0, pay_cycle || 'fortnightly']
+  );
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+  const user = result.rows[0];
   const token = generateToken(user);
   res.json({ token, user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, pay_cycle: user.pay_cycle } });
 });
 
-app.put('/api/auth/profile', authMiddleware, (req, res) => {
+app.put('/api/auth/profile', authMiddleware, async (req, res) => {
   const { display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle } = req.body;
-  const db = getDb();
-  db.prepare(
-    'UPDATE users SET display_name = COALESCE(?, display_name), gross_income = COALESCE(?, gross_income), super_rate = COALESCE(?, super_rate), hecs_repayment_rate = COALESCE(?, hecs_repayment_rate), pay_cycle = COALESCE(?, pay_cycle) WHERE id = ?'
-  ).run(display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, req.user.id);
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const db = await getDb();
+  await db.query(
+    'UPDATE users SET display_name = COALESCE($1, display_name), gross_income = COALESCE($2, gross_income), super_rate = COALESCE($3, super_rate), hecs_repayment_rate = COALESCE($4, hecs_repayment_rate), pay_cycle = COALESCE($5, pay_cycle) WHERE id = $6',
+    [display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, req.user.id]
+  );
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
   res.json({ id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, super_rate: user.super_rate, hecs_repayment_rate: user.hecs_repayment_rate, pay_cycle: user.pay_cycle });
 });
 
-app.put('/api/auth/password', authMiddleware, (req, res) => {
+app.put('/api/auth/password', authMiddleware, async (req, res) => {
   const { current_password, new_password } = req.body;
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const db = await getDb();
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
   if (!bcrypt.compareSync(current_password, user.password_hash)) {
     return res.status(400).json({ error: 'Current password is incorrect' });
   }
   const hash = bcrypt.hashSync(new_password, 10);
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, req.user.id);
+  await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
   res.json({ message: 'Password updated' });
 });
 
 // ===================== EXPENSE ROUTES =====================
 
-app.get('/api/expenses', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/expenses', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const { start, end, category, user_id } = req.query;
   let query = 'SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE 1=1';
   const params = [];
+  let paramIdx = 1;
 
-  if (start) { query += ' AND e.expense_date >= ?'; params.push(start); }
-  if (end) { query += ' AND e.expense_date <= ?'; params.push(end); }
-  if (category) { query += ' AND e.category = ?'; params.push(category); }
-  if (user_id) { query += ' AND e.user_id = ?'; params.push(user_id); }
+  if (start) { query += ` AND e.expense_date >= $${paramIdx++}`; params.push(start); }
+  if (end) { query += ` AND e.expense_date <= $${paramIdx++}`; params.push(end); }
+  if (category) { query += ` AND e.category = $${paramIdx++}`; params.push(category); }
+  if (user_id) { query += ` AND e.user_id = $${paramIdx++}`; params.push(user_id); }
 
   query += ' ORDER BY e.expense_date DESC, e.created_at DESC';
-  res.json(db.prepare(query).all(...params));
+  const { rows } = await db.query(query, params);
+  res.json(rows);
 });
 
-app.post('/api/expenses', authMiddleware, (req, res) => {
+app.post('/api/expenses', authMiddleware, async (req, res) => {
   const { category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring } = req.body;
-  const db = getDb();
-  const result = db.prepare(
-    'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(req.user.id, category, subcategory || null, description || null, amount, expense_date, entry_type || 'actual', is_range ? 1 : 0, range_low || null, range_high || null, recurring ? 1 : 0);
-  const expense = db.prepare('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = ?').get(result.lastInsertRowid);
+  const db = await getDb();
+  const result = await db.query(
+    'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
+    [req.user.id, category, subcategory || null, description || null, amount, expense_date, entry_type || 'actual', is_range ? 1 : 0, range_low || null, range_high || null, recurring ? 1 : 0]
+  );
+  const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [result.rows[0].id])).rows[0];
   res.json(expense);
 });
 
-app.post('/api/expenses/batch', authMiddleware, (req, res) => {
+app.post('/api/expenses/batch', authMiddleware, async (req, res) => {
   const { expenses } = req.body;
-  const db = getDb();
-  const insert = db.prepare(
-    'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  );
-  const insertMany = db.transaction((items) => {
-    for (const e of items) {
-      insert.run(req.user.id, e.category, e.subcategory || null, e.description || null, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range ? 1 : 0, e.range_low || null, e.range_high || null, e.recurring ? 1 : 0);
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    for (const e of expenses) {
+      await client.query(
+        'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+        [req.user.id, e.category, e.subcategory || null, e.description || null, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range ? 1 : 0, e.range_low || null, e.range_high || null, e.recurring ? 1 : 0]
+      );
     }
-  });
-  insertMany(expenses);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
   res.json({ message: `${expenses.length} expenses added` });
 });
 
-app.delete('/api/expenses/:id', authMiddleware, (req, res) => {
-  const db = getDb();
+app.delete('/api/expenses/:id', authMiddleware, async (req, res) => {
+  const db = await getDb();
   // Record deletion for persistent memory (prevent re-import)
-  const expense = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+  const expense = (await db.query('SELECT * FROM expenses WHERE id = $1', [req.params.id])).rows[0];
   if (expense) {
-    db.prepare('INSERT OR IGNORE INTO deleted_expenses (description, amount, expense_date, user_id) VALUES (?, ?, ?, ?)').run(
-      expense.description, expense.amount, expense.expense_date, expense.user_id
+    await db.query(
+      'INSERT INTO deleted_expenses (description, amount, expense_date, user_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+      [expense.description, expense.amount, expense.expense_date, expense.user_id]
     );
   }
-  db.prepare('DELETE FROM expenses WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  await db.query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
   res.json({ message: 'Deleted' });
 });
 
 // Update expense (for speed-run categorisation etc.)
-app.put('/api/expenses/:id', authMiddleware, (req, res) => {
+app.put('/api/expenses/:id', authMiddleware, async (req, res) => {
   const { category, description, amount } = req.body;
-  const db = getDb();
+  const db = await getDb();
   const updates = [];
   const params = [];
-  if (category) { updates.push('category = ?'); params.push(category); }
-  if (description !== undefined) { updates.push('description = ?'); params.push(description); }
-  if (amount !== undefined) { updates.push('amount = ?'); params.push(amount); }
+  let paramIdx = 1;
+  if (category) { updates.push(`category = $${paramIdx++}`); params.push(category); }
+  if (description !== undefined) { updates.push(`description = $${paramIdx++}`); params.push(description); }
+  if (amount !== undefined) { updates.push(`amount = $${paramIdx++}`); params.push(amount); }
   if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
   params.push(req.params.id);
-  db.prepare(`UPDATE expenses SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-  const expense = db.prepare('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = ?').get(req.params.id);
+  await db.query(`UPDATE expenses SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
+  const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [req.params.id])).rows[0];
   res.json(expense);
 });
 
 // Expense summary by period (week/month/year) with per-user breakdown
-app.get('/api/expenses/summary', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/expenses/summary', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const now = new Date();
 
   // Week start (Monday)
@@ -185,23 +204,24 @@ app.get('/api/expenses/summary', authMiddleware, (req, res) => {
   // Year start
   const yearStart = `${now.getFullYear()}-01-01`;
 
-  const users = db.prepare('SELECT id, display_name FROM users').all();
+  const users = (await db.query('SELECT id, display_name FROM users')).rows;
 
-  function getPeriodData(start, daysInPeriod) {
-    const total = db.prepare('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ?').get(start);
-    const byUser = users.map(u => {
-      const row = db.prepare('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, start);
-      return { user_id: u.id, display_name: u.display_name, total: row.total || 0, count: row.count };
-    });
-    const byCategory = db.prepare(
-      'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ? GROUP BY category ORDER BY total DESC'
-    ).all(start);
+  async function getPeriodData(start, daysInPeriod) {
+    const total = (await db.query('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= $1', [start])).rows[0];
+    const byUser = [];
+    for (const u of users) {
+      const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, start])).rows[0];
+      byUser.push({ user_id: u.id, display_name: u.display_name, total: parseFloat(row.total) || 0, count: parseInt(row.count) });
+    }
+    const byCategory = (await db.query(
+      'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= $1 GROUP BY category ORDER BY total DESC', [start]
+    )).rows;
     return {
-      total: total.total || 0,
-      count: total.count,
-      daily_avg: daysInPeriod > 0 ? Math.round((total.total || 0) / daysInPeriod) : 0,
+      total: parseFloat(total.total) || 0,
+      count: parseInt(total.count),
+      daily_avg: daysInPeriod > 0 ? Math.round((parseFloat(total.total) || 0) / daysInPeriod) : 0,
       by_user: byUser,
-      by_category: byCategory
+      by_category: byCategory.map(c => ({ ...c, total: parseFloat(c.total), count: parseInt(c.count) }))
     };
   }
 
@@ -210,169 +230,179 @@ app.get('/api/expenses/summary', authMiddleware, (req, res) => {
   const yearDays = Math.max(1, Math.ceil((now - new Date(now.getFullYear(), 0, 1)) / 86400000));
 
   res.json({
-    week: getPeriodData(weekStartStr, weekDays),
-    month: getPeriodData(monthStart, monthDays),
-    year: getPeriodData(yearStart, yearDays),
+    week: await getPeriodData(weekStartStr, weekDays),
+    month: await getPeriodData(monthStart, monthDays),
+    year: await getPeriodData(yearStart, yearDays),
   });
 });
 
 // ===================== INCOME ROUTES =====================
 
-app.get('/api/income', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/income', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const { start, end } = req.query;
   let query = 'SELECT i.*, u.display_name as user_name FROM income_entries i JOIN users u ON i.user_id = u.id WHERE 1=1';
   const params = [];
-  if (start) { query += ' AND i.pay_date >= ?'; params.push(start); }
-  if (end) { query += ' AND i.pay_date <= ?'; params.push(end); }
+  let paramIdx = 1;
+  if (start) { query += ` AND i.pay_date >= $${paramIdx++}`; params.push(start); }
+  if (end) { query += ` AND i.pay_date <= $${paramIdx++}`; params.push(end); }
   query += ' ORDER BY i.pay_date DESC';
-  res.json(db.prepare(query).all(...params));
+  res.json((await db.query(query, params)).rows);
 });
 
-app.post('/api/income', authMiddleware, (req, res) => {
+app.post('/api/income', authMiddleware, async (req, res) => {
   const { amount, net_amount, pay_date, pay_type, notes } = req.body;
-  const db = getDb();
-  const result = db.prepare(
-    'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(req.user.id, amount, net_amount || null, pay_date, pay_type || 'regular', notes || null);
-  const entry = db.prepare('SELECT * FROM income_entries WHERE id = ?').get(result.lastInsertRowid);
-  res.json(entry);
+  const db = await getDb();
+  const result = await db.query(
+    'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    [req.user.id, amount, net_amount || null, pay_date, pay_type || 'regular', notes || null]
+  );
+  res.json(result.rows[0]);
 });
 
 // ===================== FUND ALLOCATION ROUTES =====================
 
-app.get('/api/allocations', authMiddleware, (req, res) => {
-  const db = getDb();
-  const rows = db.prepare('SELECT f.*, u.display_name as user_name FROM fund_allocations f JOIN users u ON f.user_id = u.id ORDER BY f.allocated_date DESC').all();
+app.get('/api/allocations', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  const { rows } = await db.query('SELECT f.*, u.display_name as user_name FROM fund_allocations f JOIN users u ON f.user_id = u.id ORDER BY f.allocated_date DESC');
   res.json(rows);
 });
 
-app.post('/api/allocations', authMiddleware, (req, res) => {
+app.post('/api/allocations', authMiddleware, async (req, res) => {
   const { income_entry_id, allocations } = req.body;
-  const db = getDb();
-  const insert = db.prepare(
-    'INSERT INTO fund_allocations (user_id, income_entry_id, target_account, amount, allocated_date, notes) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  const insertAll = db.transaction((items) => {
-    for (const a of items) {
-      insert.run(req.user.id, income_entry_id || null, a.target_account, a.amount, a.allocated_date || new Date().toISOString().split('T')[0], a.notes || null);
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    for (const a of allocations) {
+      await client.query(
+        'INSERT INTO fund_allocations (user_id, income_entry_id, target_account, amount, allocated_date, notes) VALUES ($1, $2, $3, $4, $5, $6)',
+        [req.user.id, income_entry_id || null, a.target_account, a.amount, a.allocated_date || new Date().toISOString().split('T')[0], a.notes || null]
+      );
       // Update account balance
-      const existing = db.prepare('SELECT * FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(a.target_account);
+      const existing = (await client.query('SELECT * FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [a.target_account])).rows[0];
       const newBalance = (existing ? existing.balance : 0) + a.amount;
-      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run(a.target_account, newBalance, req.user.id);
+      await client.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', [a.target_account, newBalance, req.user.id]);
     }
-  });
-  insertAll(allocations);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
   res.json({ message: 'Allocations saved' });
 });
 
 // ===================== ACCOUNT BALANCES =====================
 
-app.get('/api/balances', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/balances', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const balances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     balances[acct] = row ? row.balance : 0;
   }
   res.json(balances);
 });
 
-app.put('/api/balances/:account', authMiddleware, (req, res) => {
+app.put('/api/balances/:account', authMiddleware, async (req, res) => {
   const { balance } = req.body;
-  const db = getDb();
-  db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run(req.params.account, balance, req.user.id);
+  const db = await getDb();
+  await db.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', [req.params.account, balance, req.user.id]);
   res.json({ account: req.params.account, balance });
 });
 
 // ===================== SAVINGS GOALS =====================
 
-app.get('/api/goals', authMiddleware, (req, res) => {
-  const db = getDb();
-  res.json(db.prepare('SELECT g.*, u.display_name as created_by_name FROM savings_goals g JOIN users u ON g.created_by = u.id WHERE g.active = 1 ORDER BY g.priority ASC').all());
+app.get('/api/goals', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  res.json((await db.query('SELECT g.*, u.display_name as created_by_name FROM savings_goals g JOIN users u ON g.created_by = u.id WHERE g.active = 1 ORDER BY g.priority ASC')).rows);
 });
 
-app.post('/api/goals', authMiddleware, (req, res) => {
+app.post('/api/goals', authMiddleware, async (req, res) => {
   const { name, target_amount, current_amount, priority, target_date, is_joint } = req.body;
-  const db = getDb();
-  const result = db.prepare(
-    'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(name, target_amount, current_amount || 0, priority || 5, target_date || null, req.user.id, is_joint !== undefined ? (is_joint ? 1 : 0) : 1);
-  const goal = db.prepare('SELECT * FROM savings_goals WHERE id = ?').get(result.lastInsertRowid);
-  res.json(goal);
+  const db = await getDb();
+  const result = await db.query(
+    'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+    [name, target_amount, current_amount || 0, priority || 5, target_date || null, req.user.id, is_joint !== undefined ? (is_joint ? 1 : 0) : 1]
+  );
+  res.json(result.rows[0]);
 });
 
-app.put('/api/goals/:id', authMiddleware, (req, res) => {
+app.put('/api/goals/:id', authMiddleware, async (req, res) => {
   const { name, target_amount, current_amount, priority, target_date, active } = req.body;
-  const db = getDb();
-  db.prepare(
-    'UPDATE savings_goals SET name = COALESCE(?, name), target_amount = COALESCE(?, target_amount), current_amount = COALESCE(?, current_amount), priority = COALESCE(?, priority), target_date = COALESCE(?, target_date), active = COALESCE(?, active) WHERE id = ?'
-  ).run(name, target_amount, current_amount, priority, target_date, active, req.params.id);
-  const goal = db.prepare('SELECT * FROM savings_goals WHERE id = ?').get(req.params.id);
+  const db = await getDb();
+  await db.query(
+    'UPDATE savings_goals SET name = COALESCE($1, name), target_amount = COALESCE($2, target_amount), current_amount = COALESCE($3, current_amount), priority = COALESCE($4, priority), target_date = COALESCE($5, target_date), active = COALESCE($6, active) WHERE id = $7',
+    [name, target_amount, current_amount, priority, target_date, active, req.params.id]
+  );
+  const goal = (await db.query('SELECT * FROM savings_goals WHERE id = $1', [req.params.id])).rows[0];
   res.json(goal);
 });
 
-app.delete('/api/goals/:id', authMiddleware, (req, res) => {
-  const db = getDb();
-  db.prepare('UPDATE savings_goals SET active = 0 WHERE id = ?').run(req.params.id);
+app.delete('/api/goals/:id', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  await db.query('UPDATE savings_goals SET active = 0 WHERE id = $1', [req.params.id]);
   res.json({ message: 'Goal deactivated' });
 });
 
 // ===================== LEVERS =====================
 
-app.get('/api/levers', authMiddleware, (req, res) => {
-  const db = getDb();
-  res.json(db.prepare('SELECT l.*, u.display_name as set_by_name FROM levers l JOIN users u ON l.set_by = u.id WHERE l.active = 1 ORDER BY l.id').all());
+app.get('/api/levers', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  res.json((await db.query('SELECT l.*, u.display_name as set_by_name FROM levers l JOIN users u ON l.set_by = u.id WHERE l.active = 1 ORDER BY l.id')).rows);
 });
 
-app.post('/api/levers', authMiddleware, (req, res) => {
+app.post('/api/levers', authMiddleware, async (req, res) => {
   const { name, description, lever_type, value } = req.body;
-  const db = getDb();
-  const result = db.prepare(
-    'INSERT INTO levers (name, description, lever_type, value, set_by) VALUES (?, ?, ?, ?, ?)'
-  ).run(name, description || null, lever_type || 'percentage', value, req.user.id);
-  const lever = db.prepare('SELECT * FROM levers WHERE id = ?').get(result.lastInsertRowid);
-  res.json(lever);
+  const db = await getDb();
+  const result = await db.query(
+    'INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [name, description || null, lever_type || 'percentage', value, req.user.id]
+  );
+  res.json(result.rows[0]);
 });
 
-app.put('/api/levers/:id', authMiddleware, (req, res) => {
+app.put('/api/levers/:id', authMiddleware, async (req, res) => {
   const { value, name, description } = req.body;
-  const db = getDb();
-  db.prepare(
-    "UPDATE levers SET value = COALESCE(?, value), name = COALESCE(?, name), description = COALESCE(?, description), set_by = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(value, name, description, req.user.id, req.params.id);
-  const lever = db.prepare('SELECT * FROM levers WHERE id = ?').get(req.params.id);
+  const db = await getDb();
+  await db.query(
+    'UPDATE levers SET value = COALESCE($1, value), name = COALESCE($2, name), description = COALESCE($3, description), set_by = $4, updated_at = NOW() WHERE id = $5',
+    [value, name, description, req.user.id, req.params.id]
+  );
+  const lever = (await db.query('SELECT * FROM levers WHERE id = $1', [req.params.id])).rows[0];
   res.json(lever);
 });
 
-app.delete('/api/levers/:id', authMiddleware, (req, res) => {
-  const db = getDb();
-  db.prepare('UPDATE levers SET active = 0 WHERE id = ?').run(req.params.id);
+app.delete('/api/levers/:id', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  await db.query('UPDATE levers SET active = 0 WHERE id = $1', [req.params.id]);
   res.json({ message: 'Lever deactivated' });
 });
 
 // ===================== UPCOMING EXPENSES =====================
 
-app.get('/api/upcoming-expenses', authMiddleware, (req, res) => {
-  const db = getDb();
-  res.json(db.prepare('SELECT ue.*, u.display_name as user_name FROM upcoming_expenses ue JOIN users u ON ue.user_id = u.id WHERE ue.resolved = 0 ORDER BY ue.expected_date ASC').all());
+app.get('/api/upcoming-expenses', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  res.json((await db.query('SELECT ue.*, u.display_name as user_name FROM upcoming_expenses ue JOIN users u ON ue.user_id = u.id WHERE ue.resolved = 0 ORDER BY ue.expected_date ASC')).rows);
 });
 
-app.post('/api/upcoming-expenses', authMiddleware, (req, res) => {
+app.post('/api/upcoming-expenses', authMiddleware, async (req, res) => {
   const { description, estimated_amount, expected_date, category, notes } = req.body;
-  const db = getDb();
-  const result = db.prepare(
-    'INSERT INTO upcoming_expenses (user_id, description, estimated_amount, expected_date, category, notes) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(req.user.id, description, estimated_amount, expected_date, category || null, notes || null);
-  const entry = db.prepare('SELECT * FROM upcoming_expenses WHERE id = ?').get(result.lastInsertRowid);
-  res.json(entry);
+  const db = await getDb();
+  const result = await db.query(
+    'INSERT INTO upcoming_expenses (user_id, description, estimated_amount, expected_date, category, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    [req.user.id, description, estimated_amount, expected_date, category || null, notes || null]
+  );
+  res.json(result.rows[0]);
 });
 
-app.put('/api/upcoming-expenses/:id', authMiddleware, (req, res) => {
+app.put('/api/upcoming-expenses/:id', authMiddleware, async (req, res) => {
   const { resolved } = req.body;
-  const db = getDb();
-  db.prepare('UPDATE upcoming_expenses SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, req.params.id);
+  const db = await getDb();
+  await db.query('UPDATE upcoming_expenses SET resolved = $1 WHERE id = $2', [resolved ? 1 : 0, req.params.id]);
   res.json({ message: 'Updated' });
 });
 
@@ -380,31 +410,31 @@ app.put('/api/upcoming-expenses/:id', authMiddleware, (req, res) => {
 
 app.post('/api/claude/payday-advice', authMiddleware, async (req, res) => {
   const { net_pay, upcoming_expenses_override } = req.body;
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const db = await getDb();
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
 
   // Get account balances
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const accountBalances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     accountBalances[acct] = row ? row.balance : 0;
   }
 
-  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
-  const recentExpenses = db.prepare('SELECT * FROM expenses WHERE expense_date >= ? ORDER BY expense_date DESC').all(twoWeeksAgo);
+  const recentExpenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1 ORDER BY expense_date DESC', [twoWeeksAgo])).rows;
   const upcomingExpenses = upcoming_expenses_override ||
-    db.prepare('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC').all();
+    (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
   try {
     const result = await getPayDayAdvice({
       user, netPay: net_pay, accountBalances, goals, levers, recentExpenses, upcomingExpenses
     });
     // Store advice
-    db.prepare('INSERT INTO claude_advice (advice_type, content, context_data) VALUES (?, ?, ?)').run(
-      'payday', result.advice, JSON.stringify({ net_pay, user_id: req.user.id })
+    await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
+      ['payday', result.advice, JSON.stringify({ net_pay, user_id: req.user.id })]
     );
     res.json(result);
   } catch (err) {
@@ -414,32 +444,31 @@ app.post('/api/claude/payday-advice', authMiddleware, async (req, res) => {
 
 app.post('/api/claude/account-sweep', authMiddleware, async (req, res) => {
   const { transaction_balance } = req.body;
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const db = await getDb();
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const accountBalances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     accountBalances[acct] = row ? row.balance : 0;
   }
 
-  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
-  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
 
-  // Get expenses from last 30 days for context (also used for month-to-date calc inside prompt)
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-  const recentExpenses = db.prepare('SELECT * FROM expenses WHERE expense_date >= ? ORDER BY expense_date DESC').all(thirtyDaysAgo);
-  const upcomingExpenses = db.prepare('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC').all();
+  const recentExpenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1 ORDER BY expense_date DESC', [thirtyDaysAgo])).rows;
+  const upcomingExpenses = (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
   try {
     const result = await getAccountSweepAdvice({
       user, transactionBalance: transaction_balance, accountBalances, goals, levers, recentExpenses, upcomingExpenses, budgets, budgetScale
     });
-    db.prepare('INSERT INTO claude_advice (advice_type, content, context_data) VALUES (?, ?, ?)').run(
-      'account-sweep', result.advice, JSON.stringify({ transaction_balance, user_id: req.user.id })
+    await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
+      ['account-sweep', result.advice, JSON.stringify({ transaction_balance, user_id: req.user.id })]
     );
     res.json(result);
   } catch (err) {
@@ -492,7 +521,7 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
     if (debitCol >= 0 && creditCol >= 0) {
       const debit = parseFloat((cols[debitCol] || '').replace(/[$,]/g, '')) || 0;
       const credit = parseFloat((cols[creditCol] || '').replace(/[$,]/g, '')) || 0;
-      amount = debit > 0 ? debit : -credit; // Positive = expense, negative = refund/payment
+      amount = debit > 0 ? debit : -credit;
     } else {
       amount = parseFloat((cols[amountCol] || '').replace(/[$,]/g, '')) || 0;
     }
@@ -520,27 +549,33 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
   res.json({ transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
 });
 
-app.post('/api/statements/import', authMiddleware, (req, res) => {
+app.post('/api/statements/import', authMiddleware, async (req, res) => {
   const { transactions } = req.body;
   if (!transactions || !transactions.length) {
     return res.status(400).json({ error: 'No transactions to import' });
   }
 
-  const db = getDb();
-  const insert = db.prepare(
-    'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0)'
-  );
-  const checkDeleted = db.prepare('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = ? AND amount = ? AND expense_date = ?');
+  const db = await getDb();
+  const client = await db.connect();
   let importSkipped = 0;
-  const importAll = db.transaction((items) => {
-    for (const t of items) {
+  try {
+    await client.query('BEGIN');
+    for (const t of transactions) {
       // Check if previously deleted (persistent memory)
-      const wasDeleted = checkDeleted.get(t.description, t.amount, t.expense_date);
-      if (wasDeleted.cnt > 0) { importSkipped++; continue; }
-      insert.run(req.user.id, t.category, t.source || 'credit_card_statement', t.description, t.amount, t.expense_date, t.entry_type || 'actual');
+      const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, t.amount, t.expense_date])).rows[0];
+      if (parseInt(wasDeleted.cnt) > 0) { importSkipped++; continue; }
+      await client.query(
+        'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, NULL, 0)',
+        [req.user.id, t.category, t.source || 'credit_card_statement', t.description, t.amount, t.expense_date, t.entry_type || 'actual']
+      );
     }
-  });
-  importAll(transactions);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
   res.json({ message: `${transactions.length} transactions imported as expenses` });
 });
 
@@ -588,42 +623,42 @@ function parseStatementDate(raw) {
 }
 
 app.post('/api/claude/nightly-summary', authMiddleware, async (req, res) => {
-  const db = getDb();
+  const db = await getDb();
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
   const today = new Date().toISOString().split('T')[0];
 
-  const expenses = db.prepare('SELECT * FROM expenses WHERE expense_date >= ?').all(thirtyDaysAgo);
-  const incomes = db.prepare('SELECT * FROM income_entries WHERE pay_date >= ?').all(thirtyDaysAgo);
+  const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
+  const incomes = (await db.query('SELECT * FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows;
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const accountBalances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     accountBalances[acct] = row ? row.balance : 0;
   }
 
-  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
 
   try {
     const result = await getNightlySummary({
       expenses, incomes, accountBalances, goals, levers, period: `${thirtyDaysAgo} to ${today}`
     });
-    db.prepare('INSERT INTO claude_advice (advice_type, content) VALUES (?, ?)').run('nightly', result.summary);
+    await db.query('INSERT INTO claude_advice (advice_type, content) VALUES ($1, $2)', ['nightly', result.summary]);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/claude/latest-advice', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/claude/latest-advice', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const { type } = req.query;
   let query = 'SELECT * FROM claude_advice';
   const params = [];
-  if (type) { query += ' WHERE advice_type = ?'; params.push(type); }
+  if (type) { query += ' WHERE advice_type = $1'; params.push(type); }
   query += ' ORDER BY created_at DESC LIMIT 1';
-  const row = db.prepare(query).get(...params);
+  const row = (await db.query(query, params)).rows[0];
   res.json(row || { content: 'No advice generated yet. Click "Get Claude Advice" to generate.', advice_type: type || 'nightly' });
 });
 
@@ -649,9 +684,9 @@ app.post('/api/screenshots/extract', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/screenshots/import', authMiddleware, (req, res) => {
+app.post('/api/screenshots/import', authMiddleware, async (req, res) => {
   try {
-    const db = getDb();
+    const db = await getDb();
     const { transactions } = req.body;
     if (!transactions || !transactions.length) return res.status(400).json({ error: 'No transactions to import' });
 
@@ -663,25 +698,29 @@ app.post('/api/screenshots/import', authMiddleware, (req, res) => {
       return `${fullYear}-${month}-${day}`;
     }
 
-    const checkDup = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND description = ? AND amount = ? AND expense_date = ?');
-    const checkDeleted = db.prepare('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = ? AND amount = ? AND expense_date = ?');
-    const insert = db.prepare('INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES (?, ?, ?, ?, ?, ?, ?)');
-
     let added = 0, skipped = 0;
-    const importAll = db.transaction(() => {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
       for (const t of transactions) {
         const date = parseDate(t.date);
         const category = t.category || autoCategorizeTxn(t.description);
-        const existing = checkDup.get(userId, t.description, t.amount, date);
-        if (existing.cnt > 0) { skipped++; continue; }
+        const existing = (await client.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4', [userId, t.description, t.amount, date])).rows[0];
+        if (parseInt(existing.cnt) > 0) { skipped++; continue; }
         // Check if this was previously deleted (persistent memory)
-        const wasDeleted = checkDeleted.get(t.description, t.amount, date);
-        if (wasDeleted.cnt > 0) { skipped++; continue; }
-        insert.run(userId, category, t.description, t.amount, date, 'actual', 0);
+        const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, t.amount, date])).rows[0];
+        if (parseInt(wasDeleted.cnt) > 0) { skipped++; continue; }
+        await client.query('INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+          [userId, category, t.description, t.amount, date, 'actual', 0]);
         added++;
       }
-    });
-    importAll();
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
 
     res.json({ added, skipped, total: added + skipped });
   } catch (err) {
@@ -691,39 +730,40 @@ app.post('/api/screenshots/import', authMiddleware, (req, res) => {
 
 // ===================== CATEGORY BUDGETS =====================
 
-app.get('/api/budgets', authMiddleware, (req, res) => {
-  const db = getDb();
-  res.json(db.prepare('SELECT * FROM category_budgets ORDER BY category').all());
+app.get('/api/budgets', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  res.json((await db.query('SELECT * FROM category_budgets ORDER BY category')).rows);
 });
 
-app.put('/api/budgets/:category', authMiddleware, (req, res) => {
+app.put('/api/budgets/:category', authMiddleware, async (req, res) => {
   const { monthly_amount } = req.body;
-  const db = getDb();
-  db.prepare("UPDATE category_budgets SET monthly_amount = ?, updated_at = datetime('now') WHERE category = ?").run(monthly_amount, req.params.category);
-  const row = db.prepare('SELECT * FROM category_budgets WHERE category = ?').get(req.params.category);
+  const db = await getDb();
+  await db.query('UPDATE category_budgets SET monthly_amount = $1, updated_at = NOW() WHERE category = $2', [monthly_amount, req.params.category]);
+  const row = (await db.query('SELECT * FROM category_budgets WHERE category = $1', [req.params.category])).rows[0];
   res.json(row);
 });
 
 // ===================== INSIGHTS (Household Pulse) =====================
 
-app.get('/api/insights', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/insights', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
 
   // Per-user activity
-  const users = db.prepare('SELECT id, display_name, username FROM users').all();
-  const userActivity = users.map(u => {
-    const lastExpense = db.prepare('SELECT expense_date FROM expenses WHERE user_id = ? ORDER BY expense_date DESC LIMIT 1').get(u.id);
-    const monthCount = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, thirtyDaysAgo);
-    const monthTotal = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, thirtyDaysAgo);
+  const users = (await db.query('SELECT id, display_name, username FROM users')).rows;
+  const userActivity = [];
+  for (const u of users) {
+    const lastExpense = (await db.query('SELECT expense_date FROM expenses WHERE user_id = $1 ORDER BY expense_date DESC LIMIT 1', [u.id])).rows[0];
+    const monthCount = (await db.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
+    const monthTotal = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
 
-    // Streak: consecutive days with at least one expense (allow today gap)
+    // Streak: consecutive days with at least one expense
     let streak = 0;
     for (let d = 0; d < 60; d++) {
       const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
-      const has = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND expense_date = ?').get(u.id, date);
-      if (has.cnt > 0) streak++;
+      const has = (await db.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND expense_date = $2', [u.id, date])).rows[0];
+      if (parseInt(has.cnt) > 0) streak++;
       else if (d > 0) break;
     }
 
@@ -731,50 +771,51 @@ app.get('/api/insights', authMiddleware, (req, res) => {
       ? Math.floor((Date.now() - new Date(lastExpense.expense_date + 'T12:00:00').getTime()) / 86400000)
       : null;
 
-    return {
+    userActivity.push({
       user_id: u.id,
       display_name: u.display_name,
       last_expense_date: lastExpense?.expense_date || null,
       days_since_last: daysSince,
-      month_count: monthCount.cnt,
-      month_total: monthTotal.total || 0,
+      month_count: parseInt(monthCount.cnt),
+      month_total: parseFloat(monthTotal.total) || 0,
       streak,
-    };
-  });
+    });
+  }
 
   // Spending pace
-  const totalMonth = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ?').get(thirtyDaysAgo);
+  const totalMonth = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
   const daysElapsed = Math.max(1, Math.floor((Date.now() - new Date(thirtyDaysAgo + 'T00:00:00').getTime()) / 86400000));
-  const dailyAvg = (totalMonth.total || 0) / daysElapsed;
+  const dailyAvg = (parseFloat(totalMonth.total) || 0) / daysElapsed;
 
   // Daily spending (last 14 days)
   const dailySpending = [];
   for (let d = 13; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
-    const row = db.prepare('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = ?').get(date);
-    dailySpending.push({ date: date.substring(5), total: row.total || 0, count: row.cnt });
+    const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
+    dailySpending.push({ date: date.substring(5), total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
   }
 
   // Top 5 biggest expenses this month
-  const biggestExpenses = db.prepare(
-    'SELECT e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date >= ? ORDER BY e.amount DESC LIMIT 5'
-  ).all(thirtyDaysAgo);
+  const biggestExpenses = (await db.query(
+    'SELECT e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date >= $1 ORDER BY e.amount DESC LIMIT 5',
+    [thirtyDaysAgo]
+  )).rows;
 
   // Recent 5 expenses
-  const recentExpenses = db.prepare(
+  const recentExpenses = (await db.query(
     'SELECT e.id, e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id ORDER BY e.created_at DESC, e.id DESC LIMIT 5'
-  ).all();
+  )).rows;
 
   // Offset interest insight
-  const offsetRow = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get('offset');
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1", ['offset'])).rows[0];
   const offsetBal = offsetRow ? offsetRow.balance : 0;
   const mortgageRate = 0.062;
   const monthlyInterestSaved = (offsetBal * mortgageRate) / 12;
   const annualInterestSaved = offsetBal * mortgageRate;
 
   // Budget data for pace comparison
-  const budgets = db.prepare('SELECT * FROM category_budgets').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const monthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
 
@@ -785,7 +826,7 @@ app.get('/api/insights', authMiddleware, (req, res) => {
       projected_monthly: Math.round(dailyAvg * 30),
       monthly_budget: Math.round(monthlyBudget),
       days_elapsed: daysElapsed,
-      total_spent: Math.round(totalMonth.total || 0),
+      total_spent: Math.round(parseFloat(totalMonth.total) || 0),
     },
     daily_spending: dailySpending,
     biggest_expenses: biggestExpenses,
@@ -801,24 +842,24 @@ app.get('/api/insights', authMiddleware, (req, res) => {
 
 // ===================== DASHBOARD / SUMMARY =====================
 
-app.get('/api/dashboard', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/dashboard', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
   const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
 
-  const monthlyExpenses = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ?').get(thirtyDaysAgo);
-  const weeklyExpenses = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ?').get(sevenDaysAgo);
-  const monthlyIncome = db.prepare('SELECT SUM(COALESCE(net_amount, amount)) as total FROM income_entries WHERE pay_date >= ?').get(thirtyDaysAgo);
+  const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+  const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
+  const monthlyIncome = (await db.query('SELECT SUM(COALESCE(net_amount, amount)) as total FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows[0];
 
-  const expensesByCategory = db.prepare(
-    'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ? GROUP BY category ORDER BY total DESC'
-  ).all(thirtyDaysAgo);
+  const expensesByCategory = (await db.query(
+    'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= $1 GROUP BY category ORDER BY total DESC',
+    [thirtyDaysAgo]
+  )).rows.map(r => ({ ...r, total: parseFloat(r.total), count: parseInt(r.count) }));
 
   // Build Monday-based weeks
   const weeklyTrend = [];
   const now = new Date();
-  // Find this Monday (day 0=Sun, 1=Mon...)
   const todayDay = now.getDay();
   const diffToMonday = todayDay === 0 ? 6 : todayDay - 1;
   const thisMonday = new Date(now);
@@ -833,29 +874,29 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
     const startStr = weekStart.toISOString().split('T')[0];
     const endStr = weekEnd.toISOString().split('T')[0];
     const label = `WB ${weekStart.getDate()}/${weekStart.getMonth() + 1}`;
-    const row = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ? AND expense_date < ?').get(startStr, endStr);
-    weeklyTrend.push({ week: label, total: row.total || 0, start: startStr, end: endStr });
+    const row = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND expense_date < $2', [startStr, endStr])).rows[0];
+    weeklyTrend.push({ week: label, total: parseFloat(row.total) || 0, start: startStr, end: endStr });
   }
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const balances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     balances[acct] = row ? row.balance : 0;
   }
 
-  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-  const users = db.prepare('SELECT id, display_name, gross_income, pay_cycle FROM users').all();
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const users = (await db.query('SELECT id, display_name, gross_income, pay_cycle FROM users')).rows;
 
   // Budget data
-  const budgets = db.prepare('SELECT * FROM category_budgets').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const weeklyBudget = totalMonthlyBudget * 12 / 52;
 
   // Estimated monthly income from tax calc
-  const allUsers = db.prepare('SELECT * FROM users').all();
+  const allUsers = (await db.query('SELECT * FROM users')).rows;
   let totalAnnualNet = 0;
   for (const u of allUsers) {
     const grossExSuper = u.gross_income / (1 + u.super_rate);
@@ -870,10 +911,10 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
   const mortgage = 4587.83;
 
   res.json({
-    monthly_expenses: monthlyExpenses.total || 0,
-    weekly_expenses: weeklyExpenses.total || 0,
-    monthly_income: monthlyIncome.total || 0,
-    net_monthly: (monthlyIncome.total || 0) - (monthlyExpenses.total || 0),
+    monthly_expenses: parseFloat(monthlyExpenses.total) || 0,
+    weekly_expenses: parseFloat(weeklyExpenses.total) || 0,
+    monthly_income: parseFloat(monthlyIncome.total) || 0,
+    net_monthly: (parseFloat(monthlyIncome.total) || 0) - (parseFloat(monthlyExpenses.total) || 0),
     expenses_by_category: expensesByCategory,
     weekly_trend: weeklyTrend,
     balances,
@@ -890,81 +931,88 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
 // ===================== DATA BACKUP =====================
 
 // Full JSON backup of all data (for disaster recovery)
-app.get('/api/backup', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/backup', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const backup = {
     exported_at: new Date().toISOString(),
-    users: db.prepare('SELECT id, username, display_name, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle FROM users').all(),
-    expenses: db.prepare('SELECT * FROM expenses ORDER BY expense_date DESC').all(),
-    income_entries: db.prepare('SELECT * FROM income_entries ORDER BY pay_date DESC').all(),
-    fund_allocations: db.prepare('SELECT * FROM fund_allocations ORDER BY allocated_date DESC').all(),
-    savings_goals: db.prepare('SELECT * FROM savings_goals').all(),
-    levers: db.prepare('SELECT * FROM levers').all(),
-    account_balances: db.prepare('SELECT * FROM account_balances ORDER BY updated_at DESC').all(),
-    category_budgets: db.prepare('SELECT * FROM category_budgets').all(),
-    upcoming_expenses: db.prepare('SELECT * FROM upcoming_expenses').all(),
-    deleted_expenses: db.prepare('SELECT * FROM deleted_expenses').all(),
+    users: (await db.query('SELECT id, username, display_name, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle FROM users')).rows,
+    expenses: (await db.query('SELECT * FROM expenses ORDER BY expense_date DESC')).rows,
+    income_entries: (await db.query('SELECT * FROM income_entries ORDER BY pay_date DESC')).rows,
+    fund_allocations: (await db.query('SELECT * FROM fund_allocations ORDER BY allocated_date DESC')).rows,
+    savings_goals: (await db.query('SELECT * FROM savings_goals')).rows,
+    levers: (await db.query('SELECT * FROM levers')).rows,
+    account_balances: (await db.query('SELECT * FROM account_balances ORDER BY updated_at DESC')).rows,
+    category_budgets: (await db.query('SELECT * FROM category_budgets')).rows,
+    upcoming_expenses: (await db.query('SELECT * FROM upcoming_expenses')).rows,
+    deleted_expenses: (await db.query('SELECT * FROM deleted_expenses')).rows,
   };
   res.setHeader('Content-Disposition', `attachment; filename=budget_backup_${new Date().toISOString().split('T')[0]}.json`);
   res.json(backup);
 });
 
 // Restore data from JSON backup
-app.post('/api/backup/restore', authMiddleware, (req, res) => {
+app.post('/api/backup/restore', authMiddleware, async (req, res) => {
   const { backup } = req.body;
   if (!backup || !backup.expenses) {
     return res.status(400).json({ error: 'Invalid backup data' });
   }
-  const db = getDb();
-
-  const restoreTransaction = db.transaction(() => {
-    // Restore expenses (skip duplicates based on description + amount + date + user_id)
-    const insertExpense = db.prepare(
-      'INSERT OR IGNORE INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-    );
-    let restored = 0;
+  const db = await getDb();
+  const client = await db.connect();
+  let restored = 0;
+  try {
+    await client.query('BEGIN');
     for (const e of backup.expenses) {
       // Check if this expense already exists
-      const existing = db.prepare(
-        'SELECT id FROM expenses WHERE user_id = ? AND description = ? AND amount = ? AND expense_date = ?'
-      ).get(e.user_id, e.description, e.amount, e.expense_date);
+      const existing = (await client.query(
+        'SELECT id FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4',
+        [e.user_id, e.description, e.amount, e.expense_date]
+      )).rows[0];
       if (!existing) {
-        insertExpense.run(e.user_id, e.category, e.subcategory || null, e.description, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range || 0, e.range_low || null, e.range_high || null, e.recurring || 0);
+        await client.query(
+          'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+          [e.user_id, e.category, e.subcategory || null, e.description, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range || 0, e.range_low || null, e.range_high || null, e.recurring || 0]
+        );
         restored++;
       }
     }
-    return restored;
-  });
-
-  const restored = restoreTransaction();
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
   res.json({ message: `Restored ${restored} expenses`, total_in_backup: backup.expenses.length });
 });
 
 // ===================== EXPORT =====================
 
-app.get('/api/export', authMiddleware, (req, res) => {
-  const db = getDb();
+app.get('/api/export', authMiddleware, async (req, res) => {
+  const db = await getDb();
   const { start, end } = req.query;
   const s = start || new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
   const e = end || new Date().toISOString().split('T')[0];
 
-  const expenses = db.prepare(
-    'SELECT e.expense_date as Date, u.display_name as User, e.category as Category, e.subcategory as Subcategory, e.description as Description, e.amount as Amount, e.entry_type as Type FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date >= ? AND e.expense_date <= ? ORDER BY e.expense_date DESC'
-  ).all(s, e);
+  const expenses = (await db.query(
+    'SELECT e.expense_date as "Date", u.display_name as "User", e.category as "Category", e.subcategory as "Subcategory", e.description as "Description", e.amount as "Amount", e.entry_type as "Type" FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date >= $1 AND e.expense_date <= $2 ORDER BY e.expense_date DESC',
+    [s, e]
+  )).rows;
 
-  const incomes = db.prepare(
-    'SELECT i.pay_date as Date, u.display_name as User, i.amount as GrossAmount, i.net_amount as NetAmount, i.pay_type as Type, i.notes as Notes FROM income_entries i JOIN users u ON i.user_id = u.id WHERE i.pay_date >= ? AND i.pay_date <= ? ORDER BY i.pay_date DESC'
-  ).all(s, e);
+  const incomes = (await db.query(
+    'SELECT i.pay_date as "Date", u.display_name as "User", i.amount as "GrossAmount", i.net_amount as "NetAmount", i.pay_type as "Type", i.notes as "Notes" FROM income_entries i JOIN users u ON i.user_id = u.id WHERE i.pay_date >= $1 AND i.pay_date <= $2 ORDER BY i.pay_date DESC',
+    [s, e]
+  )).rows;
 
-  const goals = db.prepare(
-    'SELECT name as Goal, target_amount as Target, current_amount as Current, priority as Priority, target_date as TargetDate FROM savings_goals WHERE active = 1 ORDER BY priority'
-  ).all();
+  const goals = (await db.query(
+    'SELECT name as "Goal", target_amount as "Target", current_amount as "Current", priority as "Priority", target_date as "TargetDate" FROM savings_goals WHERE active = 1 ORDER BY priority'
+  )).rows;
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-  const balanceRows = accounts.map(acct => {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
-    return { Account: acct, Balance: row ? row.balance : 0 };
-  });
+  const balanceRows = [];
+  for (const acct of accounts) {
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
+    balanceRows.push({ Account: acct, Balance: row ? row.balance : 0 });
+  }
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenses), 'Expenses');
@@ -980,18 +1028,17 @@ app.get('/api/export', authMiddleware, (req, res) => {
 
 // ===================== PROJECTIONS =====================
 
-app.get('/api/projections', authMiddleware, (req, res) => {
-  const db = getDb();
-  const users = db.prepare('SELECT * FROM users').all();
+app.get('/api/projections', authMiddleware, async (req, res) => {
+  const db = await getDb();
+  const users = (await db.query('SELECT * FROM users')).rows;
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-  const monthlyExpenses = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ?').get(thirtyDaysAgo);
+  const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
 
   // Calculate combined net income (rough estimate)
   let totalAnnualNet = 0;
   for (const u of users) {
     const grossExSuper = u.gross_income / (1 + u.super_rate);
     const taxable = grossExSuper;
-    // Simplified AU tax brackets for 2024-25
     let tax = 0;
     if (taxable > 190000) tax = 51667 + (taxable - 190000) * 0.45;
     else if (taxable > 135000) tax = 29467 + (taxable - 135000) * 0.37;
@@ -1003,22 +1050,22 @@ app.get('/api/projections', authMiddleware, (req, res) => {
   }
 
   const monthlyNetIncome = totalAnnualNet / 12;
-  const monthlyExpenseAvg = monthlyExpenses.total || 0;
+  const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
   const mortgage = 4587.83;
   const monthlySurplus = monthlyNetIncome - monthlyExpenseAvg - mortgage;
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const balances = {};
   for (const acct of accounts) {
-    const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
     balances[acct] = row ? row.balance : 0;
   }
 
-  const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-  const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
 
   // Budget data
-  const budgets = db.prepare('SELECT * FROM category_budgets').all();
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget - mortgage;
@@ -1093,21 +1140,21 @@ app.get('/api/projections', authMiddleware, (req, res) => {
 cron.schedule('0 11 * * *', async () => {
   console.log('Running nightly Claude summary...');
   try {
-    const db = getDb();
+    const db = await getDb();
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
     const today = new Date().toISOString().split('T')[0];
-    const expenses = db.prepare('SELECT * FROM expenses WHERE expense_date >= ?').all(thirtyDaysAgo);
-    const incomes = db.prepare('SELECT * FROM income_entries WHERE pay_date >= ?').all(thirtyDaysAgo);
+    const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
+    const incomes = (await db.query('SELECT * FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows;
     const accounts = ['offset', 'savings', 'credit_card', 'investment'];
     const accountBalances = {};
     for (const acct of accounts) {
-      const row = db.prepare('SELECT balance FROM account_balances WHERE account_type = ? ORDER BY updated_at DESC LIMIT 1').get(acct);
+      const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
       accountBalances[acct] = row ? row.balance : 0;
     }
-    const goals = db.prepare('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority').all();
-    const levers = db.prepare('SELECT * FROM levers WHERE active = 1').all();
+    const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+    const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
     const result = await getNightlySummary({ expenses, incomes, accountBalances, goals, levers, period: `${thirtyDaysAgo} to ${today}` });
-    db.prepare('INSERT INTO claude_advice (advice_type, content) VALUES (?, ?)').run('nightly', result.summary);
+    await db.query('INSERT INTO claude_advice (advice_type, content) VALUES ($1, $2)', ['nightly', result.summary]);
     console.log('Nightly summary saved.');
   } catch (err) {
     console.error('Nightly summary error:', err.message);

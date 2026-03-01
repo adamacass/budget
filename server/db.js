@@ -1,49 +1,29 @@
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 
-// Use DATA_DIR env var if set (Render persistent disk), otherwise default to project-relative path
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'budget.db');
+// Use DATABASE_URL for PostgreSQL connection (Render sets this automatically)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('localhost')
+    ? { rejectUnauthorized: false }
+    : false,
+});
 
-let db;
+let initialized = false;
 
-function waitForDataDir(maxWaitMs = 10000) {
-  // On Render, the persistent disk may take a moment to mount after container start.
-  // If DATA_DIR is an env-specified path, wait for it to appear before creating the DB.
-  if (!process.env.DATA_DIR) return; // local dev, no need to wait
-  const start = Date.now();
-  while (!fs.existsSync(DATA_DIR) && Date.now() - start < maxWaitMs) {
-    console.log(`Waiting for persistent disk at ${DATA_DIR}...`);
-    const waitUntil = Date.now() + 1000;
-    while (Date.now() < waitUntil) { /* busy wait 1s */ }
+async function getDb() {
+  if (!initialized) {
+    await initSchema();
+    initialized = true;
+    console.log('PostgreSQL database initialized');
   }
-  if (fs.existsSync(DATA_DIR)) {
-    console.log(`Persistent disk mounted at ${DATA_DIR}`);
-  } else {
-    console.warn(`WARNING: Persistent disk not found at ${DATA_DIR} after ${maxWaitMs}ms. Data may not persist!`);
-  }
+  return pool;
 }
 
-function getDb() {
-  if (!db) {
-    waitForDataDir();
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const isNewDb = !fs.existsSync(DB_PATH);
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    console.log(`Database opened at ${DB_PATH} (${isNewDb ? 'NEW' : 'existing'})`);
-    initSchema(isNewDb);
-  }
-  return db;
-}
-
-function initSchema(isNewDb) {
-  db.exec(`
+async function initSchema() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
@@ -52,12 +32,12 @@ function initSchema(isNewDb) {
       super_rate REAL NOT NULL DEFAULT 0.115,
       hecs_repayment_rate REAL NOT NULL DEFAULT 0,
       pay_cycle TEXT NOT NULL DEFAULT 'fortnightly',
-      created_at TEXT DEFAULT (datetime('now'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS expenses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       category TEXT NOT NULL,
       subcategory TEXT,
       description TEXT,
@@ -68,190 +48,173 @@ function initSchema(isNewDb) {
       range_low REAL,
       range_high REAL,
       recurring INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS income_entries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       amount REAL NOT NULL,
       net_amount REAL,
       pay_date TEXT NOT NULL,
       pay_type TEXT NOT NULL DEFAULT 'regular',
       notes TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS fund_allocations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      income_entry_id INTEGER,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      income_entry_id INTEGER REFERENCES income_entries(id),
       target_account TEXT NOT NULL,
       amount REAL NOT NULL,
       allocated_date TEXT NOT NULL,
       notes TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (income_entry_id) REFERENCES income_entries(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS savings_goals (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       target_amount REAL NOT NULL,
       current_amount REAL NOT NULL DEFAULT 0,
       priority INTEGER NOT NULL DEFAULT 5,
       target_date TEXT,
-      created_by INTEGER NOT NULL,
+      created_by INTEGER NOT NULL REFERENCES users(id),
       is_joint INTEGER NOT NULL DEFAULT 1,
       active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (created_by) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS levers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
       lever_type TEXT NOT NULL,
       value REAL NOT NULL DEFAULT 0,
-      set_by INTEGER NOT NULL,
+      set_by INTEGER NOT NULL REFERENCES users(id),
       active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (set_by) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS account_balances (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       account_type TEXT NOT NULL,
       balance REAL NOT NULL,
-      updated_by INTEGER NOT NULL,
-      updated_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (updated_by) REFERENCES users(id)
+      updated_by INTEGER NOT NULL REFERENCES users(id),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS claude_advice (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       advice_type TEXT NOT NULL,
       content TEXT NOT NULL,
       context_data TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS upcoming_expenses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       description TEXT NOT NULL,
       estimated_amount REAL NOT NULL,
       expected_date TEXT NOT NULL,
       category TEXT,
       notes TEXT,
       resolved INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS weekly_checkins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
       checkin_date TEXT NOT NULL,
       notes TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS category_budgets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       category TEXT UNIQUE NOT NULL,
       monthly_amount REAL NOT NULL,
-      updated_at TEXT DEFAULT (datetime('now'))
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS deleted_expenses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       description TEXT,
       amount REAL,
       expense_date TEXT,
       user_id INTEGER,
-      deleted_at TEXT DEFAULT (datetime('now')),
+      deleted_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(description, amount, expense_date, user_id)
     );
   `);
 
   // Log existing data counts for diagnostics
-  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-  const expenseCount = db.prepare('SELECT COUNT(*) as count FROM expenses').get().count;
+  const userCount = (await pool.query('SELECT COUNT(*) as count FROM users')).rows[0].count;
+  const expenseCount = (await pool.query('SELECT COUNT(*) as count FROM expenses')).rows[0].count;
   console.log(`Database status: ${userCount} users, ${expenseCount} expenses`);
 
-  // ONLY seed on a brand-new database file (not just empty tables).
-  // This prevents re-seeding after accidental data loss (e.g. disk mount issues).
-  if (!isNewDb) {
-    console.log('Existing database detected — skipping all seed operations to protect data.');
-    // Still seed category budgets if missing (they're defaults, not user data)
-    const budgetCount = db.prepare('SELECT COUNT(*) as count FROM category_budgets').get().count;
-    if (budgetCount === 0) {
-      seedCategoryBudgets();
-    }
-    return;
-  }
-
-  // Auto-seed default users if none exist (only on new DB)
-  if (userCount === 0) {
+  // Seed default users if none exist
+  if (parseInt(userCount) === 0) {
     console.log('New database — seeding default users...');
     const hash1 = bcrypt.hashSync('GoPies2023', 10);
     const hash2 = bcrypt.hashSync('GoPies2023', 10);
-    const insertUser = db.prepare(
-      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    );
-    insertUser.run('adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly');
-    insertUser.run('aruto', 'Aruto', hash2, 'partner', 70000, 0.115, 0.04, 'weekly');
 
-    const user1 = db.prepare('SELECT id FROM users WHERE username = ?').get('adam');
-    if (user1) {
-      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('offset', 57000, user1.id);
-      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('savings', 0, user1.id);
-      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('credit_card', 0, user1.id);
-      db.prepare('INSERT INTO account_balances (account_type, balance, updated_by) VALUES (?, ?, ?)').run('investment', 0, user1.id);
+    await pool.query(
+      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      ['adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly']
+    );
+    await pool.query(
+      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      ['aruto', 'Aruto', hash2, 'partner', 70000, 0.115, 0.04, 'weekly']
+    );
+
+    const user1Res = await pool.query('SELECT id FROM users WHERE username = $1', ['adam']);
+    const user1Id = user1Res.rows[0]?.id;
+    if (user1Id) {
+      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['offset', 57000, user1Id]);
+      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['savings', 0, user1Id]);
+      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['credit_card', 0, user1Id]);
+      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['investment', 0, user1Id]);
 
       // Seed default levers
-      const insertLever = db.prepare('INSERT INTO levers (name, description, lever_type, value, set_by) VALUES (?, ?, ?, ?, ?)');
-      insertLever.run('Offset Account %', 'Percentage of surplus allocated to offset account', 'percentage', 50, user1.id);
-      insertLever.run('Savings %', 'Percentage of surplus allocated to savings', 'percentage', 30, user1.id);
-      insertLever.run('Investment %', 'Percentage of surplus allocated to investments', 'percentage', 10, user1.id);
-      insertLever.run('Budget Scale %', 'Scale all category budgets (100 = conservative base, 120 = 20% more spending room, 80 = tighter)', 'percentage', 100, user1.id);
+      const insertLever = 'INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ($1, $2, $3, $4, $5)';
+      await pool.query(insertLever, ['Offset Account %', 'Percentage of surplus allocated to offset account', 'percentage', 50, user1Id]);
+      await pool.query(insertLever, ['Savings %', 'Percentage of surplus allocated to savings', 'percentage', 30, user1Id]);
+      await pool.query(insertLever, ['Investment %', 'Percentage of surplus allocated to investments', 'percentage', 10, user1Id]);
+      await pool.query(insertLever, ['Budget Scale %', 'Scale all category budgets (100 = conservative base, 120 = 20% more spending room, 80 = tighter)', 'percentage', 100, user1Id]);
       console.log('Default levers seeded');
     }
     console.log('Default users seeded: adam, aruto');
   }
 
-  // Seed statement data only on new DB with no expenses
-  if (expenseCount === 0) {
-    seedStatementData();
+  // Seed expenses if none exist
+  if (parseInt(expenseCount) === 0) {
+    await seedStatementData();
   }
 
-  // Seed category budgets
-  seedCategoryBudgets();
+  // Seed category budgets if missing
+  const budgetCount = (await pool.query('SELECT COUNT(*) as count FROM category_budgets')).rows[0].count;
+  if (parseInt(budgetCount) === 0) {
+    await seedCategoryBudgets();
+  }
 }
 
-function seedCategoryBudgets() {
-  const budgetCount = db.prepare('SELECT COUNT(*) as count FROM category_budgets').get().count;
-  if (budgetCount === 0) {
-    const insertBudget = db.prepare('INSERT INTO category_budgets (category, monthly_amount) VALUES (?, ?)');
-    const conservativeBudgets = [
-      ['Groceries', 800], ['Dining Out', 200], ['Transport', 200],
-      ['Utilities', 250], ['Insurance', 200], ['Entertainment', 100],
-      ['Health', 100], ['Clothing', 80], ['Personal Care', 60],
-      ['Subscriptions', 50], ['Pets', 50], ['Gifts', 50],
-      ['Education', 50], ['Home', 100], ['Other', 100]
-    ];
-    for (const [cat, amt] of conservativeBudgets) {
-      insertBudget.run(cat, amt);
-    }
-    console.log('Category budgets seeded (conservative / high-savings): $' + conservativeBudgets.reduce((s, b) => s + b[1], 0) + '/mo');
+async function seedCategoryBudgets() {
+  const conservativeBudgets = [
+    ['Groceries', 800], ['Dining Out', 200], ['Transport', 200],
+    ['Utilities', 250], ['Insurance', 200], ['Entertainment', 100],
+    ['Health', 100], ['Clothing', 80], ['Personal Care', 60],
+    ['Subscriptions', 50], ['Pets', 50], ['Gifts', 50],
+    ['Education', 50], ['Home', 100], ['Other', 100]
+  ];
+  for (const [cat, amt] of conservativeBudgets) {
+    await pool.query('INSERT INTO category_budgets (category, monthly_amount) VALUES ($1, $2) ON CONFLICT (category) DO NOTHING', [cat, amt]);
   }
+  console.log('Category budgets seeded (conservative / high-savings): $' + conservativeBudgets.reduce((s, b) => s + b[1], 0) + '/mo');
 }
 
 function autoCategorizeTxn(desc) {
@@ -275,12 +238,12 @@ function autoCategorizeTxn(desc) {
   return 'Other';
 }
 
-function seedStatementData() {
-  const primaryUser = db.prepare('SELECT id FROM users WHERE role = ? OR username = ?').get('primary', 'adam');
+async function seedStatementData() {
+  const primaryUser = (await pool.query("SELECT id FROM users WHERE role = $1 OR username = $2", ['primary', 'adam'])).rows[0];
   if (!primaryUser) return;
   const userId = primaryUser.id;
 
-  // Actual credit card statement transactions (Dec 2025 - Feb 2026)
+  // Actual credit card statement transactions (Dec 2025 - Mar 2026)
   const transactions = [
     ['16/12/25', 'McDonalds International Mascot NSW', 8.50],
     ['16/12/25', 'Cocacolaepp Mascot Aus', 4.50],
@@ -536,7 +499,6 @@ function seedStatementData() {
     ['16/02/26', 'Netoo Store Pty Ltd Sydney NSW', 7.14],
     ['14/02/26', 'Taxipay Australia Mascot NSW', 52.50],
     ['16/02/26', "Sq *Capp Espresso O'Co Sydney Ns", 7.09],
-    // Feb 17-21 2026
     ['17/02/26', 'Iga Plus Liquor Quay Quarter Sydney', 11.41],
     ['17/02/26', 'Cafe Clutz Clayton Utz Sydney', 8.00],
     ['17/02/26', 'Fairfax Subscriptions Pyrmont Aus', 64.99],
@@ -560,7 +522,6 @@ function seedStatementData() {
     ['21/02/26', 'Readtheclassics London Eng', 11.00],
     ['21/02/26', 'Harris Farm Markets Bridgepoint', 139.83],
     ['21/02/26', 'Chambers Cellars Mosman NSW', 23.99],
-    // Feb 22-27 2026
     ['22/02/26', 'Noahpinion San Francisco Ca', 16.00],
     ['22/02/26', 'Skittle Lane Circular Quay Sydney', 6.59],
     ['22/02/26', 'International Transaction Fee', 0.56],
@@ -582,7 +543,6 @@ function seedStatementData() {
     ['26/02/26', 'Cafe Clutz Clayton Utz Sydney', 2.80],
     ['26/02/26', 'Janus Bar Sydney NSW', 5.28],
     ['27/02/26', 'This Way Canteen Sydney NSW', 16.48],
-    // Feb 28 - Mar 1 2026
     ['28/02/26', 'Ticketek Sydney NSW', 408.70],
     ['01/03/26', 'Ww Metro 8533 Mosman Ns', 30.00],
     ['01/03/26', 'Sushi Connection Mosman NSW', 16.50],
@@ -596,29 +556,27 @@ function seedStatementData() {
     return `${fullYear}-${month}-${day}`;
   }
 
-  const insert = db.prepare(
-    'INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  );
-
-  const seedAll = db.transaction(() => {
-    for (const [dateStr, desc, amount] of transactions) {
-      const date = parseDate(dateStr);
-      const category = autoCategorizeTxn(desc);
-      insert.run(userId, category, desc, amount, date, 'actual', 0);
-    }
-  });
-  seedAll();
+  for (const [dateStr, desc, amount] of transactions) {
+    const date = parseDate(dateStr);
+    const category = autoCategorizeTxn(desc);
+    await pool.query(
+      'INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [userId, category, desc, amount, date, 'actual', 0]
+    );
+  }
   console.log(`Seeded ${transactions.length} bank statement transactions`);
 
   // Seed savings goals if none exist
-  const goalCount = db.prepare('SELECT COUNT(*) as count FROM savings_goals').get().count;
-  if (goalCount === 0) {
-    db.prepare(
-      'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run('Emergency Fund', 20000, 5700, 1, '2026-12-31', userId, 1, 1);
-    db.prepare(
-      'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run('Holiday Fund', 5000, 1200, 3, '2026-10-01', userId, 1, 1);
+  const goalCount = (await pool.query('SELECT COUNT(*) as count FROM savings_goals')).rows[0].count;
+  if (parseInt(goalCount) === 0) {
+    await pool.query(
+      'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint, active) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      ['Emergency Fund', 20000, 5700, 1, '2026-12-31', userId, 1, 1]
+    );
+    await pool.query(
+      'INSERT INTO savings_goals (name, target_amount, current_amount, priority, target_date, created_by, is_joint, active) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      ['Holiday Fund', 5000, 1200, 3, '2026-10-01', userId, 1, 1]
+    );
     console.log('Seeded savings goals');
   }
 }
