@@ -212,10 +212,10 @@ function autoCategorizeTxn(desc) {
   if (/energy|water|gas|telstra|optus|vodafone|tpg|iinet|internet|broadband|electricity|ausgrid|origin|agl|sydney water|bpay.*water/.test(d)) return 'Utilities';
   if (/insurance|allianz|qbe|suncorp|nib|medibank|bupa|hcf|ahm/.test(d)) return 'Insurance';
   if (/netflix|spotify|disney|stan|binge|kayo|apple\.com|youtube|amazon prime|amznprime|subscribe|membership|patreon|noahpinion|readtheclassics|kindle|fairfax|google one|openai|chatgpt|claude\.ai|anthropic|sam harris/.test(d)) return 'Subscriptions';
-  if (/cinema|movies|ticket|event|concert|sport|game|bowling|golf|tennis|museum|zoo|theme park|luna park|steam|steamgames|ticketmaster|united cup|sunrun/.test(d)) return 'Entertainment';
+  if (/cinema|movies|ticket|event|concert|sport|game|bowling|golf|tennis|museum|zoo|theme park|luna park|steam|steamgames|ticketmaster|ticketek|united cup|sunrun/.test(d)) return 'Entertainment';
   if (/pharmacy|chemist|doctor|gp\s|medical|dental|dentist|physio|gym|fitness|pool|yoga|pilates|health|fitness first/.test(d)) return 'Health';
   if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe|universal store|rebel|institchu|mens biz/.test(d)) return 'Clothing';
-  if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav/.test(d)) return 'Personal Care';
+  if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav|fade out/.test(d)) return 'Personal Care';
   if (/pet|vet|petbarn|petsmart|pet circle|animal/.test(d)) return 'Pets';
   if (/gift|flower|present|hamper|salvation army|gofundme/.test(d)) return 'Gifts';
   if (/course|book|udemy|education|tutor|uni|school|tafe|dymocks/.test(d)) return 'Education';
@@ -532,6 +532,12 @@ function seedStatementData() {
     ['26/02/26', 'Cafe Clutz Clayton Utz Sydney', 2.80],
     ['26/02/26', 'Janus Bar Sydney NSW', 5.28],
     ['27/02/26', 'This Way Canteen Sydney NSW', 16.48],
+    // Feb 28 - Mar 1 2026
+    ['28/02/26', 'Ticketek Sydney NSW', 408.70],
+    ['01/03/26', 'Ww Metro 8533 Mosman Ns', 30.00],
+    ['01/03/26', 'Sushi Connection Mosman NSW', 16.50],
+    ['01/03/26', 'Ritchies Supa Iga Bridgepoint Mosman NSW', 56.89],
+    ['01/03/26', 'Fade Out Barbershop Sydney NSW', 35.00],
   ];
 
   function parseDate(dateStr) {

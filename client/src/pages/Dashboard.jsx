@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getDashboard, getInsights, getLatestAdvice, addExpense } from '../api';
+import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
-import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight } from 'lucide-react';
+import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera } from 'lucide-react';
 
 const COLORS = ['#6c5ce7', '#00cec9', '#ff6b6b', '#feca57', '#54a0ff', '#a29bfe', '#fd79a8', '#55efc4', '#fab1a0', '#74b9ff'];
 const CATEGORIES = [
@@ -14,10 +15,12 @@ function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFr
 function fmtMoney2(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 export default function Dashboard() {
+  const { user } = useAuth();
   const [data, setData] = useState(null);
   const [insights, setInsights] = useState(null);
   const [advice, setAdvice] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [dismissedBanner, setDismissedBanner] = useState(false);
 
   // Quick add form
   const [category, setCategory] = useState('Groceries');
@@ -85,6 +88,17 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* ===== ARUTO TRANSACTION BANNER ===== */}
+      {user?.username === 'aruto' && !dismissedBanner && (
+        <div className="aruto-banner">
+          <Camera size={18} />
+          <div className="aruto-banner-text">
+            <strong>Hey Aruto!</strong> Can you screenshot your last month of transactions from your bank app and send them to Adam? That way we can get a full picture of household spending.
+          </div>
+          <button className="aruto-banner-dismiss" onClick={() => setDismissedBanner(true)}>&times;</button>
+        </div>
+      )}
+
       {/* ===== COMPACT WEEKLY OVERVIEW (top bar) ===== */}
       <div className="week-overview">
         <div className="week-overview-chart">
