@@ -907,6 +907,140 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   color: var(--text);
 }
 
+/* ===== Screenshot Upload ===== */
+.screenshot-upload-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.screenshot-upload-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.screenshot-upload-header span { flex: 1; }
+
+.screenshot-extracting {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--accent);
+}
+
+.screenshot-review {
+  margin-top: 0.75rem;
+}
+
+.screenshot-review-header {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.screenshot-txn-list {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.screenshot-txn-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.screenshot-txn-row:last-child { border-bottom: none; }
+
+.screenshot-txn-date {
+  width: 75px;
+  padding: 0.3rem 0.4rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.screenshot-txn-desc {
+  flex: 1;
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.screenshot-txn-amount {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.screenshot-txn-amount input {
+  width: 70px;
+  padding: 0.3rem 0.4rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.screenshot-txn-cat {
+  width: 110px;
+  padding: 0.3rem 0.35rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.72rem;
+}
+
+.screenshot-txn-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.2rem;
+  display: flex;
+  align-items: center;
+}
+
+.screenshot-txn-remove:hover { color: var(--red); }
+
+.screenshot-review-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .screenshot-txn-row { flex-wrap: wrap; }
+  .screenshot-txn-desc { min-width: 100%; order: -1; }
+  .screenshot-txn-cat { flex: 1; }
+}
+
 /* ===== Weekly Overview (compact top bar) ===== */
 .week-overview {
   display: flex;

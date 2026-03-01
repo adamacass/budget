@@ -5,15 +5,15 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const cron = require('node-cron');
 const XLSX = require('xlsx');
-const { getDb } = require('./db');
+const { getDb, autoCategorizeTxn } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
-const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice } = require('./claude');
+const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = require('./claude');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
@@ -567,6 +567,64 @@ app.get('/api/claude/latest-advice', authMiddleware, (req, res) => {
   query += ' ORDER BY created_at DESC LIMIT 1';
   const row = db.prepare(query).get(...params);
   res.json(row || { content: 'No advice generated yet. Click "Get Claude Advice" to generate.', advice_type: type || 'nightly' });
+});
+
+// ===================== SCREENSHOT TRANSACTION IMPORT =====================
+
+app.post('/api/screenshots/extract', authMiddleware, async (req, res) => {
+  try {
+    const { image, media_type } = req.body;
+    if (!image) return res.status(400).json({ error: 'No image provided' });
+
+    const result = await extractTransactionsFromImage(image, media_type || 'image/png');
+    if (result.error) return res.status(500).json({ error: result.error });
+
+    // Auto-categorize each extracted transaction
+    const categorized = result.transactions.map(t => ({
+      ...t,
+      category: autoCategorizeTxn(t.description)
+    }));
+
+    res.json({ transactions: categorized });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/screenshots/import', authMiddleware, (req, res) => {
+  try {
+    const db = getDb();
+    const { transactions } = req.body;
+    if (!transactions || !transactions.length) return res.status(400).json({ error: 'No transactions to import' });
+
+    const userId = req.user.id;
+
+    function parseDate(dateStr) {
+      const [day, month, year] = dateStr.split('/');
+      const fullYear = year.length === 4 ? year : (parseInt(year) < 50 ? `20${year}` : `19${year}`);
+      return `${fullYear}-${month}-${day}`;
+    }
+
+    const checkDup = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND description = ? AND amount = ? AND expense_date = ?');
+    const insert = db.prepare('INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES (?, ?, ?, ?, ?, ?, ?)');
+
+    let added = 0, skipped = 0;
+    const importAll = db.transaction(() => {
+      for (const t of transactions) {
+        const date = parseDate(t.date);
+        const category = t.category || autoCategorizeTxn(t.description);
+        const existing = checkDup.get(userId, t.description, t.amount, date);
+        if (existing.cnt > 0) { skipped++; continue; }
+        insert.run(userId, category, t.description, t.amount, date, 'actual', 0);
+        added++;
+      }
+    });
+    importAll();
+
+    res.json({ added, skipped, total: added + skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ===================== CATEGORY BUDGETS =====================

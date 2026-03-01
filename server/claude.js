@@ -249,4 +249,54 @@ Provide your response as:
   }
 }
 
-module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice };
+async function extractTransactionsFromImage(base64Image, mediaType) {
+  const anthropic = getClient();
+  if (!anthropic) return { error: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: mediaType, data: base64Image }
+          },
+          {
+            type: 'text',
+            text: `Extract ALL transactions from this bank/credit card statement screenshot. For each transaction return:
+- date: the transaction date in DD/MM/YY format
+- description: the merchant/payee name exactly as shown
+- amount: the dollar amount as a number (no $ sign, no negatives)
+
+Return ONLY a JSON array, no other text. Example:
+[{"date":"01/03/26","description":"Woolworths Metro Mosman","amount":30.00}]
+
+Rules:
+- Include every visible transaction, don't skip any
+- Use the date as shown on the screenshot
+- For amounts, just use the number (e.g. 30.00 not -$30.00)
+- If a transaction says "Pending:", still include it
+- Keep merchant names as-is from the screenshot
+- If you can't read a value clearly, make your best guess`
+          }
+        ]
+      }]
+    });
+
+    const text = message.content[0].text.trim();
+    // Extract JSON from response (handle markdown code blocks)
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return { error: 'Could not parse transactions from image', raw: text };
+
+    const transactions = JSON.parse(jsonMatch[0]);
+    return { transactions };
+  } catch (err) {
+    console.error('Claude vision API error:', err.message);
+    return { error: `Claude API error: ${err.message}` };
+  }
+}
+
+module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage };

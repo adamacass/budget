@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getDashboard, getInsights, getLatestAdvice, addExpense } from '../api';
+import { getDashboard, getInsights, getLatestAdvice, addExpense, extractScreenshot, importScreenshot } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
-import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera } from 'lucide-react';
+import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera, Upload, X, Edit3 } from 'lucide-react';
 
 const COLORS = ['#6c5ce7', '#00cec9', '#ff6b6b', '#feca57', '#54a0ff', '#a29bfe', '#fd79a8', '#55efc4', '#fab1a0', '#74b9ff'];
 const CATEGORIES = [
@@ -31,6 +31,13 @@ export default function Dashboard() {
   const [addedMsg, setAddedMsg] = useState('');
   const amountRef = useRef(null);
 
+  // Screenshot upload
+  const [extracting, setExtracting] = useState(false);
+  const [extracted, setExtracted] = useState(null); // { transactions: [...] }
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
+
   function loadAll() {
     Promise.all([getDashboard(), getInsights(), getLatestAdvice('nightly')])
       .then(([d, i, a]) => { setData(d); setInsights(i); setAdvice(a); })
@@ -57,6 +64,62 @@ export default function Dashboard() {
       amountRef.current?.focus();
     } catch (err) { alert(err.message); }
     setAdding(false);
+  }
+
+  async function handleScreenshot(e) {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setExtracting(true);
+    setExtracted(null);
+    setImportResult(null);
+
+    try {
+      const allTransactions = [];
+      for (const file of files) {
+        const base64 = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(file);
+        });
+        const mediaType = file.type || 'image/png';
+        const result = await extractScreenshot(base64, mediaType);
+        if (result.transactions) allTransactions.push(...result.transactions);
+      }
+      setExtracted({ transactions: allTransactions });
+    } catch (err) {
+      alert('Error extracting transactions: ' + err.message);
+    }
+    setExtracting(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function updateExtractedTxn(index, field, value) {
+    setExtracted(prev => {
+      const updated = [...prev.transactions];
+      updated[index] = { ...updated[index], [field]: field === 'amount' ? parseFloat(value) || 0 : value };
+      return { transactions: updated };
+    });
+  }
+
+  function removeExtractedTxn(index) {
+    setExtracted(prev => ({
+      transactions: prev.transactions.filter((_, i) => i !== index)
+    }));
+  }
+
+  async function handleImportExtracted() {
+    if (!extracted?.transactions?.length) return;
+    setImporting(true);
+    try {
+      const result = await importScreenshot(extracted.transactions);
+      setImportResult(result);
+      setExtracted(null);
+      Promise.all([getDashboard(), getInsights()])
+        .then(([d, i]) => { setData(d); setInsights(i); });
+      setTimeout(() => setImportResult(null), 5000);
+    } catch (err) { alert('Import error: ' + err.message); }
+    setImporting(false);
   }
 
   if (loading) return <div className="loading-page"><div className="spinner" /> Loading dashboard...</div>;
@@ -93,7 +156,7 @@ export default function Dashboard() {
         <div className="aruto-banner">
           <Camera size={18} />
           <div className="aruto-banner-text">
-            <strong>Hey Aruto!</strong> Can you screenshot your last month of transactions from your bank app and send them to Adam? That way we can get a full picture of household spending.
+            <strong>Hey Aruto!</strong> Screenshot your last month of transactions from your bank app and upload them below — Claude will automatically read and categorise everything.
           </div>
           <button className="aruto-banner-dismiss" onClick={() => setDismissedBanner(true)}>&times;</button>
         </div>
@@ -171,6 +234,66 @@ export default function Dashboard() {
                 <span className="recent-who">{e.user_name}</span>
               </span>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* ===== SCREENSHOT UPLOAD ===== */}
+      <div className="screenshot-upload-card">
+        <div className="screenshot-upload-header">
+          <Camera size={16} />
+          <span>Import from Screenshot</span>
+          <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleScreenshot}
+            style={{ display: 'none' }} />
+          <button className="btn btn-ghost btn-sm" onClick={() => fileInputRef.current?.click()}
+            disabled={extracting}>
+            <Upload size={14} /> {extracting ? 'Reading...' : 'Upload'}
+          </button>
+        </div>
+        {extracting && (
+          <div className="screenshot-extracting">
+            <div className="spinner" /> Claude is reading your screenshot...
+          </div>
+        )}
+        {importResult && (
+          <div className="quick-add-confirm">
+            <CheckCircle size={14} /> Imported {importResult.added} transaction{importResult.added !== 1 ? 's' : ''}
+            {importResult.skipped > 0 && ` (${importResult.skipped} duplicates skipped)`}
+          </div>
+        )}
+        {extracted?.transactions?.length > 0 && (
+          <div className="screenshot-review">
+            <div className="screenshot-review-header">
+              <span>{extracted.transactions.length} transactions found — review &amp; confirm:</span>
+            </div>
+            <div className="screenshot-txn-list">
+              {extracted.transactions.map((t, i) => (
+                <div key={i} className="screenshot-txn-row">
+                  <input className="screenshot-txn-date" type="text" value={t.date}
+                    onChange={e => updateExtractedTxn(i, 'date', e.target.value)} />
+                  <input className="screenshot-txn-desc" type="text" value={t.description}
+                    onChange={e => updateExtractedTxn(i, 'description', e.target.value)} />
+                  <div className="screenshot-txn-amount">
+                    <span>$</span>
+                    <input type="number" step="0.01" value={t.amount}
+                      onChange={e => updateExtractedTxn(i, 'amount', e.target.value)} />
+                  </div>
+                  <select className="screenshot-txn-cat" value={t.category}
+                    onChange={e => updateExtractedTxn(i, 'category', e.target.value)}>
+                    {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                  <button className="screenshot-txn-remove" onClick={() => removeExtractedTxn(i)}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="screenshot-review-actions">
+              <button className="btn btn-primary" onClick={handleImportExtracted} disabled={importing}>
+                {importing ? 'Importing...' : `Import ${extracted.transactions.length} Transactions`}
+              </button>
+              <button className="btn btn-ghost" onClick={() => setExtracted(null)}>Cancel</button>
+            </div>
           </div>
         )}
       </div>

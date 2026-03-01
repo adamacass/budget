@@ -573,4 +573,4 @@ function seedStatementData() {
   }
 }
 
-module.exports = { getDb };
+module.exports = { getDb, autoCategorizeTxn };
