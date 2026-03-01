@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard } from 'lucide-react';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard, PiggyBank } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
@@ -10,6 +10,7 @@ const buildTime = typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : null;
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/expenses', icon: Receipt, label: 'Expenses' },
+  { to: '/budget', icon: PiggyBank, label: 'Budget' },
   { to: '/payday', icon: Wallet, label: 'Pay Day' },
   { to: '/goals', icon: Target, label: 'Goals & Levers' },
   { to: '/projections', icon: TrendingUp, label: 'Projections' },

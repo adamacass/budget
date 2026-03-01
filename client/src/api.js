@@ -41,6 +41,8 @@ export const getExpenses = (params = {}) => {
 export const addExpense = (data) => apiFetch('/api/expenses', { method: 'POST', body: JSON.stringify(data) });
 export const addExpensesBatch = (expenses) => apiFetch('/api/expenses/batch', { method: 'POST', body: JSON.stringify({ expenses }) });
 export const deleteExpense = (id) => apiFetch(`/api/expenses/${id}`, { method: 'DELETE' });
+export const updateExpense = (id, data) => apiFetch(`/api/expenses/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+export const getExpenseSummary = () => apiFetch('/api/expenses/summary');
 
 // Income
 export const getIncome = (params = {}) => {

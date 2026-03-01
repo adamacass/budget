@@ -139,8 +139,81 @@ app.post('/api/expenses/batch', authMiddleware, (req, res) => {
 
 app.delete('/api/expenses/:id', authMiddleware, (req, res) => {
   const db = getDb();
+  // Record deletion for persistent memory (prevent re-import)
+  const expense = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.id);
+  if (expense) {
+    db.prepare('INSERT OR IGNORE INTO deleted_expenses (description, amount, expense_date, user_id) VALUES (?, ?, ?, ?)').run(
+      expense.description, expense.amount, expense.expense_date, expense.user_id
+    );
+  }
   db.prepare('DELETE FROM expenses WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ message: 'Deleted' });
+});
+
+// Update expense (for speed-run categorisation etc.)
+app.put('/api/expenses/:id', authMiddleware, (req, res) => {
+  const { category, description, amount } = req.body;
+  const db = getDb();
+  const updates = [];
+  const params = [];
+  if (category) { updates.push('category = ?'); params.push(category); }
+  if (description !== undefined) { updates.push('description = ?'); params.push(description); }
+  if (amount !== undefined) { updates.push('amount = ?'); params.push(amount); }
+  if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+  params.push(req.params.id);
+  db.prepare(`UPDATE expenses SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  const expense = db.prepare('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = ?').get(req.params.id);
+  res.json(expense);
+});
+
+// Expense summary by period (week/month/year) with per-user breakdown
+app.get('/api/expenses/summary', authMiddleware, (req, res) => {
+  const db = getDb();
+  const now = new Date();
+
+  // Week start (Monday)
+  const todayDay = now.getDay();
+  const diffToMonday = todayDay === 0 ? 6 : todayDay - 1;
+  const weekStart = new Date(now);
+  weekStart.setDate(weekStart.getDate() - diffToMonday);
+  weekStart.setHours(0, 0, 0, 0);
+  const weekStartStr = weekStart.toISOString().split('T')[0];
+
+  // Month start
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
+  // Year start
+  const yearStart = `${now.getFullYear()}-01-01`;
+
+  const users = db.prepare('SELECT id, display_name FROM users').all();
+
+  function getPeriodData(start, daysInPeriod) {
+    const total = db.prepare('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ?').get(start);
+    const byUser = users.map(u => {
+      const row = db.prepare('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE user_id = ? AND expense_date >= ?').get(u.id, start);
+      return { user_id: u.id, display_name: u.display_name, total: row.total || 0, count: row.count };
+    });
+    const byCategory = db.prepare(
+      'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ? GROUP BY category ORDER BY total DESC'
+    ).all(start);
+    return {
+      total: total.total || 0,
+      count: total.count,
+      daily_avg: daysInPeriod > 0 ? Math.round((total.total || 0) / daysInPeriod) : 0,
+      by_user: byUser,
+      by_category: byCategory
+    };
+  }
+
+  const weekDays = Math.max(1, Math.ceil((now - weekStart) / 86400000));
+  const monthDays = Math.max(1, now.getDate());
+  const yearDays = Math.max(1, Math.ceil((now - new Date(now.getFullYear(), 0, 1)) / 86400000));
+
+  res.json({
+    week: getPeriodData(weekStartStr, weekDays),
+    month: getPeriodData(monthStart, monthDays),
+    year: getPeriodData(yearStart, yearDays),
+  });
 });
 
 // ===================== INCOME ROUTES =====================
@@ -457,8 +530,13 @@ app.post('/api/statements/import', authMiddleware, (req, res) => {
   const insert = db.prepare(
     'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0)'
   );
+  const checkDeleted = db.prepare('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = ? AND amount = ? AND expense_date = ?');
+  let importSkipped = 0;
   const importAll = db.transaction((items) => {
     for (const t of items) {
+      // Check if previously deleted (persistent memory)
+      const wasDeleted = checkDeleted.get(t.description, t.amount, t.expense_date);
+      if (wasDeleted.cnt > 0) { importSkipped++; continue; }
       insert.run(req.user.id, t.category, t.source || 'credit_card_statement', t.description, t.amount, t.expense_date, t.entry_type || 'actual');
     }
   });
@@ -586,6 +664,7 @@ app.post('/api/screenshots/import', authMiddleware, (req, res) => {
     }
 
     const checkDup = db.prepare('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = ? AND description = ? AND amount = ? AND expense_date = ?');
+    const checkDeleted = db.prepare('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = ? AND amount = ? AND expense_date = ?');
     const insert = db.prepare('INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES (?, ?, ?, ?, ?, ?, ?)');
 
     let added = 0, skipped = 0;
@@ -595,6 +674,9 @@ app.post('/api/screenshots/import', authMiddleware, (req, res) => {
         const category = t.category || autoCategorizeTxn(t.description);
         const existing = checkDup.get(userId, t.description, t.amount, date);
         if (existing.cnt > 0) { skipped++; continue; }
+        // Check if this was previously deleted (persistent memory)
+        const wasDeleted = checkDeleted.get(t.description, t.amount, date);
+        if (wasDeleted.cnt > 0) { skipped++; continue; }
         insert.run(userId, category, t.description, t.amount, date, 'actual', 0);
         added++;
       }

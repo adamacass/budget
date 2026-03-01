@@ -2,9 +2,11 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
+import Home from './pages/Home';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Expenses from './pages/Expenses';
+import Budget from './pages/Budget';
 import PayDay from './pages/PayDay';
 import Goals from './pages/Goals';
 import Projections from './pages/Projections';
@@ -24,8 +26,11 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route index element={<Dashboard />} />
-        <Route path="expenses" element={<Expenses />} />
+        <Route element={<Home />}>
+          <Route index element={<Dashboard />} />
+          <Route path="expenses" element={<Expenses />} />
+          <Route path="budget" element={<Budget />} />
+        </Route>
         <Route path="payday" element={<PayDay />} />
         <Route path="goals" element={<Goals />} />
         <Route path="projections" element={<Projections />} />

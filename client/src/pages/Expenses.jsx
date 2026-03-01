@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { getExpenses, addExpense, addExpensesBatch, deleteExpense } from '../api';
-import { Plus, Trash2, Filter } from 'lucide-react';
+import { getExpenses, getExpenseSummary, addExpense, addExpensesBatch, deleteExpense, updateExpense } from '../api';
+import { Plus, Trash2, Filter, Zap, Users, X, Check, ChevronDown, ChevronUp } from 'lucide-react';
 
 const CATEGORIES = [
   'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
@@ -16,14 +16,24 @@ const SYDNEY_RANGES = {
 };
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtShort(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
 
 export default function Expenses() {
   const [expenses, setExpenses] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [entryMode, setEntryMode] = useState('individual');
   const [filter, setFilter] = useState('');
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
+  const [period, setPeriod] = useState('week');
+  const [showFilters, setShowFilters] = useState(false);
+
+  // Speed run state
+  const [speedRunMode, setSpeedRunMode] = useState(false);
+  const [uncategorized, setUncategorized] = useState([]);
+  const [speedRunIndex, setSpeedRunIndex] = useState(0);
+  const [speedRunSaving, setSpeedRunSaving] = useState(false);
 
   // Individual entry form
   const [form, setForm] = useState({
@@ -31,19 +41,15 @@ export default function Expenses() {
     expense_date: new Date().toISOString().split('T')[0], recurring: false
   });
 
-  // Range entry (weekly check-in)
+  // Range entry
   const [rangeEntries, setRangeEntries] = useState(
     CATEGORIES.slice(0, 12).map(cat => ({
-      category: cat,
-      amount: '',
-      range_low: SYDNEY_RANGES[cat]?.[0] || '',
-      range_high: SYDNEY_RANGES[cat]?.[1] || '',
-      is_range: true,
-      use_range: false
+      category: cat, amount: '', range_low: SYDNEY_RANGES[cat]?.[0] || '',
+      range_high: SYDNEY_RANGES[cat]?.[1] || '', is_range: true, use_range: false
     }))
   );
 
-  useEffect(() => { loadExpenses(); }, []);
+  useEffect(() => { loadExpenses(); loadSummary(); }, []);
 
   async function loadExpenses() {
     setLoading(true);
@@ -58,18 +64,21 @@ export default function Expenses() {
     setLoading(false);
   }
 
+  async function loadSummary() {
+    try { setSummary(await getExpenseSummary()); } catch (err) { console.error(err); }
+  }
+
   async function handleAddSingle(e) {
     e.preventDefault();
     try {
       const expense = await addExpense({
-        ...form,
-        amount: parseFloat(form.amount),
-        entry_type: 'actual',
-        is_range: false
+        ...form, amount: parseFloat(form.amount),
+        entry_type: 'actual', is_range: false
       });
       setExpenses(prev => [expense, ...prev]);
       setForm({ ...form, subcategory: '', description: '', amount: '' });
       setShowAdd(false);
+      loadSummary();
     } catch (err) { alert(err.message); }
   }
 
@@ -90,6 +99,7 @@ export default function Expenses() {
     try {
       await addExpensesBatch(entries);
       loadExpenses();
+      loadSummary();
       setShowAdd(false);
     } catch (err) { alert(err.message); }
   }
@@ -98,22 +108,213 @@ export default function Expenses() {
     if (!confirm('Delete this expense?')) return;
     await deleteExpense(id);
     setExpenses(prev => prev.filter(e => e.id !== id));
+    loadSummary();
   }
 
+  // Speed run
+  async function startSpeedRun() {
+    try {
+      const data = await getExpenses({ category: 'Other' });
+      if (data.length === 0) { alert('No uncategorized expenses found!'); return; }
+      setUncategorized(data);
+      setSpeedRunIndex(0);
+      setSpeedRunMode(true);
+    } catch (err) { alert(err.message); }
+  }
+
+  async function categorizeExpense(id, category) {
+    setSpeedRunSaving(true);
+    try {
+      await updateExpense(id, { category });
+      setUncategorized(prev => prev.filter(e => e.id !== id));
+    } catch (err) { alert(err.message); }
+    setSpeedRunSaving(false);
+  }
+
+  function skipExpense() {
+    setSpeedRunIndex(i => Math.min(i + 1, uncategorized.length));
+  }
+
+  const currentPeriod = summary?.[period];
+  const maxUserTotal = currentPeriod ? Math.max(...(currentPeriod.by_user?.map(u => u.total) || [1]), 1) : 1;
   const total = expenses.reduce((s, e) => s + e.amount, 0);
+
+  // Speed run current expense
+  const speedRunCurrent = uncategorized[speedRunIndex];
 
   return (
     <div>
-      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <h2>Expenses</h2>
-          <p>Track every dollar or estimate weekly ranges</p>
+      {/* Speed Run Modal */}
+      {speedRunMode && (
+        <div className="modal-overlay" onClick={() => setSpeedRunMode(false)}>
+          <div className="modal speed-run-modal" onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Zap size={18} style={{ color: 'var(--yellow)' }} /> Speed Run
+              </h3>
+              <button className="btn btn-ghost btn-sm" onClick={() => setSpeedRunMode(false)}><X size={14} /></button>
+            </div>
+
+            {uncategorized.length > 0 && speedRunIndex < uncategorized.length ? (
+              <>
+                <div className="speed-run-progress">
+                  <div className="progress-bar" style={{ height: 4, margin: 0 }}>
+                    <div className="progress-fill green" style={{ width: `${((uncategorized.length - (uncategorized.length - speedRunIndex)) / (uncategorized.length + speedRunIndex)) * 100}%` }} />
+                  </div>
+                  <span>{uncategorized.length} remaining</span>
+                </div>
+
+                <div className="speed-run-expense">
+                  <div className="speed-run-date">{speedRunCurrent.expense_date}</div>
+                  <div className="speed-run-desc">{speedRunCurrent.description || 'No description'}</div>
+                  <div className="speed-run-amount">{fmtMoney(speedRunCurrent.amount)}</div>
+                  <div className="speed-run-user">{speedRunCurrent.user_name}</div>
+                </div>
+
+                <div className="speed-run-categories">
+                  {CATEGORIES.filter(c => c !== 'Other').map(c => (
+                    <button
+                      key={c}
+                      className="speed-run-cat-btn"
+                      disabled={speedRunSaving}
+                      onClick={() => categorizeExpense(speedRunCurrent.id, c)}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem', justifyContent: 'center' }}>
+                  <button className="btn btn-ghost btn-sm" onClick={skipExpense}>Skip</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setSpeedRunMode(false)}>Done</button>
+                </div>
+              </>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '2rem' }}>
+                <Check size={36} style={{ color: 'var(--green)', marginBottom: '0.5rem' }} />
+                <div style={{ fontWeight: 600 }}>All done!</div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>No more uncategorized expenses.</div>
+                <button className="btn btn-primary" style={{ marginTop: '1rem' }} onClick={() => { setSpeedRunMode(false); loadExpenses(); loadSummary(); }}>Close</button>
+              </div>
+            )}
+          </div>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowAdd(!showAdd)}>
-          <Plus size={16} /> Add Expense
+      )}
+
+      {/* Period Toggle + Speed Run */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div className="period-toggle">
+          <button className={period === 'week' ? 'active' : ''} onClick={() => setPeriod('week')}>Week</button>
+          <button className={period === 'month' ? 'active' : ''} onClick={() => setPeriod('month')}>Month</button>
+          <button className={period === 'year' ? 'active' : ''} onClick={() => setPeriod('year')}>Year</button>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={startSpeedRun}>
+          <Zap size={14} /> Speed Run
         </button>
       </div>
 
+      {/* Summary Cards */}
+      {currentPeriod && (
+        <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+          <div className="stat-card">
+            <div className="stat-label">Total Spent</div>
+            <div className="stat-value negative">{fmtShort(currentPeriod.total)}</div>
+            <div className="card-sub">{currentPeriod.count} transactions</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Daily Average</div>
+            <div className="stat-value warning">{fmtShort(currentPeriod.daily_avg)}</div>
+            <div className="card-sub">per day</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Top Category</div>
+            <div className="stat-value neutral" style={{ fontSize: '1.1rem' }}>
+              {currentPeriod.by_category?.[0]?.category || '-'}
+            </div>
+            <div className="card-sub">{fmtShort(currentPeriod.by_category?.[0]?.total)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Adam vs Aruto */}
+      {currentPeriod?.by_user?.length > 0 && (
+        <div className="card">
+          <div className="card-title">
+            <Users size={14} /> Adam vs Aruto — {period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : 'This Year'}
+          </div>
+          {currentPeriod.by_user.map((u, i) => (
+            <div key={u.user_id} className="vs-row">
+              <div className="vs-avatar" style={{ background: i === 0 ? 'var(--accent)' : 'var(--green)' }}>
+                {u.display_name[0]}
+              </div>
+              <div className="vs-name">{u.display_name}</div>
+              <div className="vs-bar-container">
+                <div
+                  className="vs-bar"
+                  style={{
+                    width: `${maxUserTotal > 0 ? (u.total / maxUserTotal) * 100 : 0}%`,
+                    background: i === 0 ? 'var(--accent)' : 'var(--green)'
+                  }}
+                />
+              </div>
+              <div className="vs-amount">{fmtShort(u.total)}</div>
+              <div className="vs-count">{u.count} txns</div>
+            </div>
+          ))}
+          {currentPeriod.by_user.length === 2 && (
+            <div className="vs-diff">
+              {(() => {
+                const diff = Math.abs(currentPeriod.by_user[0].total - currentPeriod.by_user[1].total);
+                if (diff < 1) return 'Equal spending!';
+                const higher = currentPeriod.by_user[0].total > currentPeriod.by_user[1].total
+                  ? currentPeriod.by_user[0] : currentPeriod.by_user[1];
+                return `${higher.display_name} spent ${fmtShort(diff)} more`;
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Category Breakdown */}
+      {currentPeriod?.by_category?.length > 0 && (
+        <div className="card">
+          <div className="card-title">Category Breakdown</div>
+          <div className="budget-bars">
+            {currentPeriod.by_category.slice(0, 8).map(c => {
+              const pct = currentPeriod.total > 0 ? (c.total / currentPeriod.total) * 100 : 0;
+              return (
+                <div key={c.category} className="budget-bar-row">
+                  <div className="budget-bar-label">
+                    <span>{c.category}</span>
+                    <span>
+                      <strong>{fmtShort(c.total)}</strong>
+                      <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>({pct.toFixed(0)}%)</span>
+                    </span>
+                  </div>
+                  <div className="progress-bar" style={{ height: 8, margin: '2px 0' }}>
+                    <div className="progress-fill" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Add Expense + Filters Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.5rem', marginBottom: '0.75rem' }}>
+        <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>All Expenses</h3>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setShowFilters(!showFilters)}>
+            <Filter size={14} /> {showFilters ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+          <button className="btn btn-primary btn-sm" onClick={() => setShowAdd(!showAdd)}>
+            <Plus size={14} /> Add
+          </button>
+        </div>
+      </div>
+
+      {/* Add Expense Form */}
       {showAdd && (
         <div className="card">
           <div className="tabs">
@@ -209,8 +410,7 @@ export default function Expenses() {
                         </td>
                         <td>
                           <input className="form-input" type="number" step="0.01" value={entry.amount}
-                            disabled={entry.use_range}
-                            style={{ width: 120 }}
+                            disabled={entry.use_range} style={{ width: 120 }}
                             placeholder={entry.use_range ? 'Using range' : '0.00'}
                             onChange={e => {
                               const copy = [...rangeEntries];
@@ -232,27 +432,29 @@ export default function Expenses() {
       )}
 
       {/* Filters */}
-      <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label>From</label>
-          <input className="form-input" type="date" value={dateRange.start} onChange={e => setDateRange({ ...dateRange, start: e.target.value })} />
+      {showFilters && (
+        <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'flex-end' }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>From</label>
+            <input className="form-input" type="date" value={dateRange.start} onChange={e => setDateRange({ ...dateRange, start: e.target.value })} />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>To</label>
+            <input className="form-input" type="date" value={dateRange.end} onChange={e => setDateRange({ ...dateRange, end: e.target.value })} />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>Category</label>
+            <select className="form-select" value={filter} onChange={e => setFilter(e.target.value)}>
+              <option value="">All</option>
+              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={loadExpenses}><Filter size={14} /> Apply</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setDateRange({ start: '', end: '' }); setFilter(''); setTimeout(loadExpenses, 0); }}>Clear</button>
         </div>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label>To</label>
-          <input className="form-input" type="date" value={dateRange.end} onChange={e => setDateRange({ ...dateRange, end: e.target.value })} />
-        </div>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label>Category</label>
-          <select className="form-select" value={filter} onChange={e => setFilter(e.target.value)}>
-            <option value="">All</option>
-            {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-          </select>
-        </div>
-        <button className="btn btn-ghost btn-sm" onClick={loadExpenses}><Filter size={14} /> Apply</button>
-        <button className="btn btn-ghost btn-sm" onClick={() => { setDateRange({ start: '', end: '' }); setFilter(''); setTimeout(loadExpenses, 0); }}>Clear</button>
-      </div>
+      )}
 
-      {/* Summary */}
+      {/* Summary bar */}
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between' }}>
         <span style={{ fontWeight: 600 }}>Total: {fmtMoney(total)}</span>
         <span style={{ color: 'var(--text-muted)' }}>{expenses.length} entries</span>
@@ -277,7 +479,7 @@ export default function Expenses() {
               <tbody>
                 {expenses.length === 0 ? (
                   <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>
-                    No expenses yet. Click "Add Expense" to start tracking.
+                    No expenses yet. Click "Add" to start tracking.
                   </td></tr>
                 ) : expenses.map(e => (
                   <tr key={e.id}>

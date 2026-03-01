@@ -148,6 +148,16 @@ function initSchema() {
       monthly_amount REAL NOT NULL,
       updated_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS deleted_expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      description TEXT,
+      amount REAL,
+      expense_date TEXT,
+      user_id INTEGER,
+      deleted_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(description, amount, expense_date, user_id)
+    );
   `);
 
   // Auto-seed default users if none exist
