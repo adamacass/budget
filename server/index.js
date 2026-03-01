@@ -695,12 +695,26 @@ app.get('/api/dashboard', authMiddleware, (req, res) => {
     'SELECT category, SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= ? GROUP BY category ORDER BY total DESC'
   ).all(thirtyDaysAgo);
 
+  // Build Monday-based weeks
   const weeklyTrend = [];
+  const now = new Date();
+  // Find this Monday (day 0=Sun, 1=Mon...)
+  const todayDay = now.getDay();
+  const diffToMonday = todayDay === 0 ? 6 : todayDay - 1;
+  const thisMonday = new Date(now);
+  thisMonday.setDate(thisMonday.getDate() - diffToMonday);
+  thisMonday.setHours(0, 0, 0, 0);
+
   for (let i = 3; i >= 0; i--) {
-    const weekStart = new Date(Date.now() - (i + 1) * 7 * 86400000).toISOString().split('T')[0];
-    const weekEnd = new Date(Date.now() - i * 7 * 86400000).toISOString().split('T')[0];
-    const row = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ? AND expense_date < ?').get(weekStart, weekEnd);
-    weeklyTrend.push({ week: `Week -${i}`, total: row.total || 0, start: weekStart, end: weekEnd });
+    const weekStart = new Date(thisMonday);
+    weekStart.setDate(weekStart.getDate() - i * 7);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+    const startStr = weekStart.toISOString().split('T')[0];
+    const endStr = weekEnd.toISOString().split('T')[0];
+    const label = `WB ${weekStart.getDate()}/${weekStart.getMonth() + 1}`;
+    const row = db.prepare('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= ? AND expense_date < ?').get(startStr, endStr);
+    weeklyTrend.push({ week: label, total: row.total || 0, start: startStr, end: endStr });
   }
 
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
