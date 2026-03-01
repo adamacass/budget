@@ -12,6 +12,9 @@ const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransa
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Wrap async route handlers so unhandled rejections return 500 instead of crashing
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
@@ -38,7 +41,7 @@ app.get('/api/version', (req, res) => {
 
 // ===================== AUTH ROUTES =====================
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', asyncHandler(async (req, res) => {
   const { username, password } = req.body;
   const db = await getDb();
   const { rows } = await db.query('SELECT * FROM users WHERE username = $1', [username]);
@@ -60,9 +63,9 @@ app.post('/api/auth/login', async (req, res) => {
       pay_cycle: user.pay_cycle
     }
   });
-});
+}));
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', asyncHandler(async (req, res) => {
   const { username, password, display_name, gross_income, pay_cycle, super_rate, hecs_repayment_rate } = req.body;
   const db = await getDb();
   const existing = (await db.query('SELECT id FROM users WHERE username = $1', [username])).rows[0];
@@ -77,9 +80,9 @@ app.post('/api/auth/register', async (req, res) => {
   const user = result.rows[0];
   const token = generateToken(user);
   res.json({ token, user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, pay_cycle: user.pay_cycle } });
-});
+}));
 
-app.put('/api/auth/profile', authMiddleware, async (req, res) => {
+app.put('/api/auth/profile', authMiddleware, asyncHandler(async (req, res) => {
   const { display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle } = req.body;
   const db = await getDb();
   await db.query(
@@ -88,9 +91,9 @@ app.put('/api/auth/profile', authMiddleware, async (req, res) => {
   );
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
   res.json({ id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, super_rate: user.super_rate, hecs_repayment_rate: user.hecs_repayment_rate, pay_cycle: user.pay_cycle });
-});
+}));
 
-app.put('/api/auth/password', authMiddleware, async (req, res) => {
+app.put('/api/auth/password', authMiddleware, asyncHandler(async (req, res) => {
   const { current_password, new_password } = req.body;
   const db = await getDb();
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
@@ -100,11 +103,11 @@ app.put('/api/auth/password', authMiddleware, async (req, res) => {
   const hash = bcrypt.hashSync(new_password, 10);
   await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
   res.json({ message: 'Password updated' });
-});
+}));
 
 // ===================== EXPENSE ROUTES =====================
 
-app.get('/api/expenses', authMiddleware, async (req, res) => {
+app.get('/api/expenses', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const { start, end, category, user_id } = req.query;
   let query = 'SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE 1=1';
@@ -119,9 +122,9 @@ app.get('/api/expenses', authMiddleware, async (req, res) => {
   query += ' ORDER BY e.expense_date DESC, e.created_at DESC';
   const { rows } = await db.query(query, params);
   res.json(rows);
-});
+}));
 
-app.post('/api/expenses', authMiddleware, async (req, res) => {
+app.post('/api/expenses', authMiddleware, asyncHandler(async (req, res) => {
   const { category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring } = req.body;
   const db = await getDb();
   const result = await db.query(
@@ -130,9 +133,9 @@ app.post('/api/expenses', authMiddleware, async (req, res) => {
   );
   const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [result.rows[0].id])).rows[0];
   res.json(expense);
-});
+}));
 
-app.post('/api/expenses/batch', authMiddleware, async (req, res) => {
+app.post('/api/expenses/batch', authMiddleware, asyncHandler(async (req, res) => {
   const { expenses } = req.body;
   const db = await getDb();
   const client = await db.connect();
@@ -152,9 +155,9 @@ app.post('/api/expenses/batch', authMiddleware, async (req, res) => {
     client.release();
   }
   res.json({ message: `${expenses.length} expenses added` });
-});
+}));
 
-app.delete('/api/expenses/:id', authMiddleware, async (req, res) => {
+app.delete('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   // Record deletion for persistent memory (prevent re-import)
   const expense = (await db.query('SELECT * FROM expenses WHERE id = $1', [req.params.id])).rows[0];
@@ -166,10 +169,10 @@ app.delete('/api/expenses/:id', authMiddleware, async (req, res) => {
   }
   await db.query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
   res.json({ message: 'Deleted' });
-});
+}));
 
 // Update expense (for speed-run categorisation etc.)
-app.put('/api/expenses/:id', authMiddleware, async (req, res) => {
+app.put('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
   const { category, description, amount } = req.body;
   const db = await getDb();
   const updates = [];
@@ -183,10 +186,10 @@ app.put('/api/expenses/:id', authMiddleware, async (req, res) => {
   await db.query(`UPDATE expenses SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
   const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [req.params.id])).rows[0];
   res.json(expense);
-});
+}));
 
 // Expense summary by period (week/month/year) with per-user breakdown
-app.get('/api/expenses/summary', authMiddleware, async (req, res) => {
+app.get('/api/expenses/summary', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const now = new Date();
 
@@ -234,11 +237,11 @@ app.get('/api/expenses/summary', authMiddleware, async (req, res) => {
     month: await getPeriodData(monthStart, monthDays),
     year: await getPeriodData(yearStart, yearDays),
   });
-});
+}));
 
 // ===================== INCOME ROUTES =====================
 
-app.get('/api/income', authMiddleware, async (req, res) => {
+app.get('/api/income', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const { start, end } = req.query;
   let query = 'SELECT i.*, u.display_name as user_name FROM income_entries i JOIN users u ON i.user_id = u.id WHERE 1=1';
@@ -248,9 +251,9 @@ app.get('/api/income', authMiddleware, async (req, res) => {
   if (end) { query += ` AND i.pay_date <= $${paramIdx++}`; params.push(end); }
   query += ' ORDER BY i.pay_date DESC';
   res.json((await db.query(query, params)).rows);
-});
+}));
 
-app.post('/api/income', authMiddleware, async (req, res) => {
+app.post('/api/income', authMiddleware, asyncHandler(async (req, res) => {
   const { amount, net_amount, pay_date, pay_type, notes } = req.body;
   const db = await getDb();
   const result = await db.query(
@@ -258,17 +261,17 @@ app.post('/api/income', authMiddleware, async (req, res) => {
     [req.user.id, amount, net_amount || null, pay_date, pay_type || 'regular', notes || null]
   );
   res.json(result.rows[0]);
-});
+}));
 
 // ===================== FUND ALLOCATION ROUTES =====================
 
-app.get('/api/allocations', authMiddleware, async (req, res) => {
+app.get('/api/allocations', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const { rows } = await db.query('SELECT f.*, u.display_name as user_name FROM fund_allocations f JOIN users u ON f.user_id = u.id ORDER BY f.allocated_date DESC');
   res.json(rows);
-});
+}));
 
-app.post('/api/allocations', authMiddleware, async (req, res) => {
+app.post('/api/allocations', authMiddleware, asyncHandler(async (req, res) => {
   const { income_entry_id, allocations } = req.body;
   const db = await getDb();
   const client = await db.connect();
@@ -292,11 +295,11 @@ app.post('/api/allocations', authMiddleware, async (req, res) => {
     client.release();
   }
   res.json({ message: 'Allocations saved' });
-});
+}));
 
 // ===================== ACCOUNT BALANCES =====================
 
-app.get('/api/balances', authMiddleware, async (req, res) => {
+app.get('/api/balances', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const accounts = ['offset', 'savings', 'credit_card', 'investment'];
   const balances = {};
@@ -305,23 +308,23 @@ app.get('/api/balances', authMiddleware, async (req, res) => {
     balances[acct] = row ? row.balance : 0;
   }
   res.json(balances);
-});
+}));
 
-app.put('/api/balances/:account', authMiddleware, async (req, res) => {
+app.put('/api/balances/:account', authMiddleware, asyncHandler(async (req, res) => {
   const { balance } = req.body;
   const db = await getDb();
   await db.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', [req.params.account, balance, req.user.id]);
   res.json({ account: req.params.account, balance });
-});
+}));
 
 // ===================== SAVINGS GOALS =====================
 
-app.get('/api/goals', authMiddleware, async (req, res) => {
+app.get('/api/goals', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   res.json((await db.query('SELECT g.*, u.display_name as created_by_name FROM savings_goals g JOIN users u ON g.created_by = u.id WHERE g.active = 1 ORDER BY g.priority ASC')).rows);
-});
+}));
 
-app.post('/api/goals', authMiddleware, async (req, res) => {
+app.post('/api/goals', authMiddleware, asyncHandler(async (req, res) => {
   const { name, target_amount, current_amount, priority, target_date, is_joint } = req.body;
   const db = await getDb();
   const result = await db.query(
@@ -329,9 +332,9 @@ app.post('/api/goals', authMiddleware, async (req, res) => {
     [name, target_amount, current_amount || 0, priority || 5, target_date || null, req.user.id, is_joint !== undefined ? (is_joint ? 1 : 0) : 1]
   );
   res.json(result.rows[0]);
-});
+}));
 
-app.put('/api/goals/:id', authMiddleware, async (req, res) => {
+app.put('/api/goals/:id', authMiddleware, asyncHandler(async (req, res) => {
   const { name, target_amount, current_amount, priority, target_date, active } = req.body;
   const db = await getDb();
   await db.query(
@@ -340,22 +343,22 @@ app.put('/api/goals/:id', authMiddleware, async (req, res) => {
   );
   const goal = (await db.query('SELECT * FROM savings_goals WHERE id = $1', [req.params.id])).rows[0];
   res.json(goal);
-});
+}));
 
-app.delete('/api/goals/:id', authMiddleware, async (req, res) => {
+app.delete('/api/goals/:id', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   await db.query('UPDATE savings_goals SET active = 0 WHERE id = $1', [req.params.id]);
   res.json({ message: 'Goal deactivated' });
-});
+}));
 
 // ===================== LEVERS =====================
 
-app.get('/api/levers', authMiddleware, async (req, res) => {
+app.get('/api/levers', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   res.json((await db.query('SELECT l.*, u.display_name as set_by_name FROM levers l JOIN users u ON l.set_by = u.id WHERE l.active = 1 ORDER BY l.id')).rows);
-});
+}));
 
-app.post('/api/levers', authMiddleware, async (req, res) => {
+app.post('/api/levers', authMiddleware, asyncHandler(async (req, res) => {
   const { name, description, lever_type, value } = req.body;
   const db = await getDb();
   const result = await db.query(
@@ -363,9 +366,9 @@ app.post('/api/levers', authMiddleware, async (req, res) => {
     [name, description || null, lever_type || 'percentage', value, req.user.id]
   );
   res.json(result.rows[0]);
-});
+}));
 
-app.put('/api/levers/:id', authMiddleware, async (req, res) => {
+app.put('/api/levers/:id', authMiddleware, asyncHandler(async (req, res) => {
   const { value, name, description } = req.body;
   const db = await getDb();
   await db.query(
@@ -374,22 +377,22 @@ app.put('/api/levers/:id', authMiddleware, async (req, res) => {
   );
   const lever = (await db.query('SELECT * FROM levers WHERE id = $1', [req.params.id])).rows[0];
   res.json(lever);
-});
+}));
 
-app.delete('/api/levers/:id', authMiddleware, async (req, res) => {
+app.delete('/api/levers/:id', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   await db.query('UPDATE levers SET active = 0 WHERE id = $1', [req.params.id]);
   res.json({ message: 'Lever deactivated' });
-});
+}));
 
 // ===================== UPCOMING EXPENSES =====================
 
-app.get('/api/upcoming-expenses', authMiddleware, async (req, res) => {
+app.get('/api/upcoming-expenses', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   res.json((await db.query('SELECT ue.*, u.display_name as user_name FROM upcoming_expenses ue JOIN users u ON ue.user_id = u.id WHERE ue.resolved = 0 ORDER BY ue.expected_date ASC')).rows);
-});
+}));
 
-app.post('/api/upcoming-expenses', authMiddleware, async (req, res) => {
+app.post('/api/upcoming-expenses', authMiddleware, asyncHandler(async (req, res) => {
   const { description, estimated_amount, expected_date, category, notes } = req.body;
   const db = await getDb();
   const result = await db.query(
@@ -397,18 +400,18 @@ app.post('/api/upcoming-expenses', authMiddleware, async (req, res) => {
     [req.user.id, description, estimated_amount, expected_date, category || null, notes || null]
   );
   res.json(result.rows[0]);
-});
+}));
 
-app.put('/api/upcoming-expenses/:id', authMiddleware, async (req, res) => {
+app.put('/api/upcoming-expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
   const { resolved } = req.body;
   const db = await getDb();
   await db.query('UPDATE upcoming_expenses SET resolved = $1 WHERE id = $2', [resolved ? 1 : 0, req.params.id]);
   res.json({ message: 'Updated' });
-});
+}));
 
 // ===================== CLAUDE AI ROUTES =====================
 
-app.post('/api/claude/payday-advice', authMiddleware, async (req, res) => {
+app.post('/api/claude/payday-advice', authMiddleware, asyncHandler(async (req, res) => {
   const { net_pay, upcoming_expenses_override } = req.body;
   const db = await getDb();
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
@@ -440,9 +443,9 @@ app.post('/api/claude/payday-advice', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
-app.post('/api/claude/account-sweep', authMiddleware, async (req, res) => {
+app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, res) => {
   const { transaction_balance } = req.body;
   const db = await getDb();
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
@@ -474,7 +477,7 @@ app.post('/api/claude/account-sweep', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // ===================== CREDIT CARD STATEMENT IMPORT =====================
 
@@ -549,7 +552,7 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
   res.json({ transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
 });
 
-app.post('/api/statements/import', authMiddleware, async (req, res) => {
+app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res) => {
   const { transactions } = req.body;
   if (!transactions || !transactions.length) {
     return res.status(400).json({ error: 'No transactions to import' });
@@ -577,7 +580,7 @@ app.post('/api/statements/import', authMiddleware, async (req, res) => {
     client.release();
   }
   res.json({ message: `${transactions.length} transactions imported as expenses` });
-});
+}));
 
 // CSV parsing helper — handles quoted fields
 function parseCSVLine(line) {
@@ -622,7 +625,7 @@ function parseStatementDate(raw) {
   return null;
 }
 
-app.post('/api/claude/nightly-summary', authMiddleware, async (req, res) => {
+app.post('/api/claude/nightly-summary', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
   const today = new Date().toISOString().split('T')[0];
@@ -649,9 +652,9 @@ app.post('/api/claude/nightly-summary', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
-app.get('/api/claude/latest-advice', authMiddleware, async (req, res) => {
+app.get('/api/claude/latest-advice', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const { type } = req.query;
   let query = 'SELECT * FROM claude_advice';
@@ -660,11 +663,11 @@ app.get('/api/claude/latest-advice', authMiddleware, async (req, res) => {
   query += ' ORDER BY created_at DESC LIMIT 1';
   const row = (await db.query(query, params)).rows[0];
   res.json(row || { content: 'No advice generated yet. Click "Get Claude Advice" to generate.', advice_type: type || 'nightly' });
-});
+}));
 
 // ===================== SCREENSHOT TRANSACTION IMPORT =====================
 
-app.post('/api/screenshots/extract', authMiddleware, async (req, res) => {
+app.post('/api/screenshots/extract', authMiddleware, asyncHandler(async (req, res) => {
   try {
     const { image, media_type } = req.body;
     if (!image) return res.status(400).json({ error: 'No image provided' });
@@ -682,9 +685,9 @@ app.post('/api/screenshots/extract', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
-app.post('/api/screenshots/import', authMiddleware, async (req, res) => {
+app.post('/api/screenshots/import', authMiddleware, asyncHandler(async (req, res) => {
   try {
     const db = await getDb();
     const { transactions } = req.body;
@@ -726,26 +729,26 @@ app.post('/api/screenshots/import', authMiddleware, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // ===================== CATEGORY BUDGETS =====================
 
-app.get('/api/budgets', authMiddleware, async (req, res) => {
+app.get('/api/budgets', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   res.json((await db.query('SELECT * FROM category_budgets ORDER BY category')).rows);
-});
+}));
 
-app.put('/api/budgets/:category', authMiddleware, async (req, res) => {
+app.put('/api/budgets/:category', authMiddleware, asyncHandler(async (req, res) => {
   const { monthly_amount } = req.body;
   const db = await getDb();
   await db.query('UPDATE category_budgets SET monthly_amount = $1, updated_at = NOW() WHERE category = $2', [monthly_amount, req.params.category]);
   const row = (await db.query('SELECT * FROM category_budgets WHERE category = $1', [req.params.category])).rows[0];
   res.json(row);
-});
+}));
 
 // ===================== INSIGHTS (Household Pulse) =====================
 
-app.get('/api/insights', authMiddleware, async (req, res) => {
+app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
@@ -838,11 +841,11 @@ app.get('/api/insights', authMiddleware, async (req, res) => {
       mortgage_rate: mortgageRate,
     },
   });
-});
+}));
 
 // ===================== DASHBOARD / SUMMARY =====================
 
-app.get('/api/dashboard', authMiddleware, async (req, res) => {
+app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
@@ -926,12 +929,12 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
     weekly_budget: Math.round(weeklyBudget),
     budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) }))
   });
-});
+}));
 
 // ===================== DATA BACKUP =====================
 
 // Full JSON backup of all data (for disaster recovery)
-app.get('/api/backup', authMiddleware, async (req, res) => {
+app.get('/api/backup', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const backup = {
     exported_at: new Date().toISOString(),
@@ -948,10 +951,10 @@ app.get('/api/backup', authMiddleware, async (req, res) => {
   };
   res.setHeader('Content-Disposition', `attachment; filename=budget_backup_${new Date().toISOString().split('T')[0]}.json`);
   res.json(backup);
-});
+}));
 
 // Restore data from JSON backup
-app.post('/api/backup/restore', authMiddleware, async (req, res) => {
+app.post('/api/backup/restore', authMiddleware, asyncHandler(async (req, res) => {
   const { backup } = req.body;
   if (!backup || !backup.expenses) {
     return res.status(400).json({ error: 'Invalid backup data' });
@@ -983,11 +986,11 @@ app.post('/api/backup/restore', authMiddleware, async (req, res) => {
     client.release();
   }
   res.json({ message: `Restored ${restored} expenses`, total_in_backup: backup.expenses.length });
-});
+}));
 
 // ===================== EXPORT =====================
 
-app.get('/api/export', authMiddleware, async (req, res) => {
+app.get('/api/export', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const { start, end } = req.query;
   const s = start || new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
@@ -1024,11 +1027,11 @@ app.get('/api/export', authMiddleware, async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename=budget_${s}_to_${e}.xlsx`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(buffer);
-});
+}));
 
 // ===================== PROJECTIONS =====================
 
-app.get('/api/projections', authMiddleware, async (req, res) => {
+app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const users = (await db.query('SELECT * FROM users')).rows;
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
@@ -1134,7 +1137,7 @@ app.get('/api/projections', authMiddleware, async (req, res) => {
     status,
     message
   });
-});
+}));
 
 // Nightly cron job for Claude summary (runs at 9pm AEST = 11:00 UTC)
 cron.schedule('0 11 * * *', async () => {
@@ -1167,6 +1170,12 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
   });
 }
+
+// Global error handler — catches unhandled errors from asyncHandler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 app.listen(PORT, () => {
   console.log(`Budget server running on port ${PORT}`);
