@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getBalances, updateBalance, exportToExcel, downloadBackup, restoreBackup } from '../api';
-import { Save, Download, Key, User, DollarSign, Database, Upload } from 'lucide-react';
+import { getBalances, updateBalance, exportToExcel, downloadBackup, restoreBackup, getCategoryRules, deleteCategoryRule } from '../api';
+import { Save, Download, Key, User, DollarSign, Database, Upload, Smartphone, Tag, Trash2, Copy } from 'lucide-react';
+import { CATEGORIES, getCategoryColor } from '../categoryColors';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
@@ -30,9 +31,27 @@ export default function Settings() {
     end: new Date().toISOString().split('T')[0]
   });
 
+  // Category rules
+  const [rules, setRules] = useState([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+
   useEffect(() => {
     getBalances().then(setBalances).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    if (tab === 'rules') {
+      setRulesLoading(true);
+      getCategoryRules().then(setRules).catch(console.error).finally(() => setRulesLoading(false));
+    }
+  }, [tab]);
+
+  async function handleDeleteRule(id) {
+    try {
+      await deleteCategoryRule(id);
+      setRules(prev => prev.filter(r => r.id !== id));
+    } catch (err) { alert(err.message); }
+  }
 
   async function handleSaveProfile(e) {
     e.preventDefault();
@@ -88,6 +107,12 @@ export default function Settings() {
         </button>
         <button className={`tab ${tab === 'backup' ? 'active' : ''}`} onClick={() => setTab('backup')}>
           <Database size={14} style={{ marginRight: 4 }} /> Backup
+        </button>
+        <button className={`tab ${tab === 'rules' ? 'active' : ''}`} onClick={() => setTab('rules')}>
+          <Tag size={14} style={{ marginRight: 4 }} /> Category Rules
+        </button>
+        <button className={`tab ${tab === 'widget' ? 'active' : ''}`} onClick={() => setTab('widget')}>
+          <Smartphone size={14} style={{ marginRight: 4 }} /> iPhone Widget
         </button>
       </div>
 
@@ -269,6 +294,249 @@ export default function Settings() {
           <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '1rem' }}>
             We recommend downloading a backup regularly to protect against data loss.
           </p>
+        </div>
+      )}
+
+      {tab === 'rules' && (
+        <div className="card">
+          <div className="card-title"><Tag size={14} /> Learned Category Rules</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            When you categorise a transaction, the app learns to auto-categorise future transactions from the same supplier.
+            These rules are applied when parsing new statements or screenshots.
+          </p>
+          {rulesLoading ? (
+            <div style={{ textAlign: 'center', padding: '1rem' }}><div className="spinner" /></div>
+          ) : rules.length === 0 ? (
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              No learned rules yet. Categorise transactions in Expenses or Speed Run mode and rules will appear here.
+            </p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Supplier Pattern</th>
+                    <th>Category</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map(r => (
+                    <tr key={r.id}>
+                      <td style={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{r.supplier_pattern}</td>
+                      <td>
+                        <span className="tag" style={{ background: `${getCategoryColor(r.category)}22`, color: getCategoryColor(r.category) }}>
+                          {r.category}
+                        </span>
+                      </td>
+                      <td>
+                        <button className="btn btn-ghost btn-sm" onClick={() => handleDeleteRule(r.id)} title="Delete rule">
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'widget' && (
+        <div className="card">
+          <div className="card-title"><Smartphone size={14} /> iPhone Widget (Scriptable)</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Add a budget widget to your iPhone home screen using the free <strong>Scriptable</strong> app.
+          </p>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Setup Instructions</h4>
+            <ol style={{ fontSize: '0.82rem', lineHeight: 1.8, paddingLeft: '1.25rem', color: 'var(--text-muted)' }}>
+              <li>Install <strong>Scriptable</strong> from the App Store</li>
+              <li>Open Scriptable, tap <strong>+</strong> to create a new script</li>
+              <li>Paste the code below</li>
+              <li>Update <code>BASE_URL</code> to your app's URL and <code>TOKEN</code> with your auth token</li>
+              <li>Run the script once to test it</li>
+              <li>Go to your home screen, long-press → Add Widget → Scriptable</li>
+              <li>Choose <strong>Medium</strong> size, then tap the widget to select your script</li>
+            </ol>
+          </div>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Your Auth Token</h4>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <code style={{ fontSize: '0.7rem', padding: '0.5rem', background: 'var(--bg-input)', borderRadius: 6, wordBreak: 'break-all', flex: 1 }}>
+                {localStorage.getItem('token')?.substring(0, 40)}...
+              </code>
+              <button className="btn btn-ghost btn-sm" onClick={() => {
+                navigator.clipboard.writeText(localStorage.getItem('token') || '');
+                alert('Token copied to clipboard');
+              }}>
+                <Copy size={14} /> Copy
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '0.5rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Scriptable Code</h4>
+            <button className="btn btn-ghost btn-sm" style={{ marginBottom: '0.5rem' }} onClick={() => {
+              const code = document.getElementById('scriptable-code')?.textContent || '';
+              navigator.clipboard.writeText(code);
+              alert('Code copied to clipboard');
+            }}>
+              <Copy size={14} /> Copy Code
+            </button>
+          </div>
+          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Budget Widget for Scriptable
+// Shows daily/weekly/monthly spending, budget pace, and per-user activity
+
+const BASE_URL = "${window.location.origin}";
+const TOKEN = "PASTE_YOUR_TOKEN_HERE";
+
+async function fetchWidget() {
+  const req = new Request(BASE_URL + "/api/widget");
+  req.headers = { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" };
+  return await req.loadJSON();
+}
+
+function fmt(n) { return "$" + Math.round(n).toLocaleString(); }
+
+function timeAgo(dateStr) {
+  if (!dateStr) return "Never";
+  const ms = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  const days = Math.floor(hrs / 24);
+  return days + "d ago";
+}
+
+try {
+  const d = await fetchWidget();
+  const w = new ListWidget();
+  w.backgroundColor = new Color("#0f1117");
+  w.setPadding(12, 14, 12, 14);
+
+  // Title row
+  const titleStack = w.addStack();
+  titleStack.layoutHorizontally();
+  titleStack.centerAlignContent();
+  const corgi = titleStack.addText(d.under_budget ? "\\u{1F436}" : "\\u{1F61E}");
+  corgi.font = Font.systemFont(14);
+  titleStack.addSpacer(4);
+  const title = titleStack.addText("Budget Tracker");
+  title.font = Font.boldSystemFont(13);
+  title.textColor = new Color("#e8eaf0");
+  titleStack.addSpacer();
+  const paceText = titleStack.addText(d.pace_percent + "%");
+  paceText.font = Font.boldSystemFont(13);
+  paceText.textColor = d.under_budget ? new Color("#00cec9") : new Color("#ff6b6b");
+
+  w.addSpacer(6);
+
+  // Spending row
+  const spendStack = w.addStack();
+  spendStack.layoutHorizontally();
+  const cols = [
+    { label: "Today", value: fmt(d.today_spent), color: "#e8eaf0" },
+    { label: "Week", value: fmt(d.week_spent), color: "#54a0ff" },
+    { label: "Month", value: fmt(d.month_spent), color: "#6c5ce7" },
+    { label: "Budget", value: fmt(d.monthly_budget), color: "#00cec9" },
+  ];
+  for (const col of cols) {
+    const c = spendStack.addStack();
+    c.layoutVertically();
+    const lbl = c.addText(col.label);
+    lbl.font = Font.systemFont(9);
+    lbl.textColor = new Color("#8b8fa3");
+    const val = c.addText(col.value);
+    val.font = Font.boldSystemFont(12);
+    val.textColor = new Color(col.color);
+    spendStack.addSpacer();
+  }
+
+  w.addSpacer(6);
+
+  // Progress bar
+  const barStack = w.addStack();
+  barStack.layoutHorizontally();
+  barStack.cornerRadius = 3;
+  barStack.size = new Size(0, 6);
+  barStack.backgroundColor = new Color("#2d3148");
+  const fillWidth = Math.min(d.pace_percent, 100);
+  const fillColor = d.pace_percent <= 90 ? "#00cec9" : d.pace_percent <= 100 ? "#feca57" : "#ff6b6b";
+  const barCtx = new DrawContext();
+  barCtx.size = new Size(300, 6);
+  barCtx.opaque = false;
+  barCtx.setFillColor(new Color("#2d3148"));
+  barCtx.fillRect(new Rect(0, 0, 300, 6));
+  barCtx.setFillColor(new Color(fillColor));
+  barCtx.fillRect(new Rect(0, 0, fillWidth * 3, 6));
+  const barImg = w.addImage(barCtx.getImage());
+  barImg.cornerRadius = 3;
+  barImg.imageSize = new Size(0, 6);
+
+  w.addSpacer(6);
+
+  // Per-user activity
+  for (const u of d.users) {
+    const uStack = w.addStack();
+    uStack.layoutHorizontally();
+    uStack.centerAlignContent();
+    const nameColor = u.name.toLowerCase().includes("adam") ? "#6c5ce7" : "#00cec9";
+    const dot = uStack.addText("\\u25CF ");
+    dot.font = Font.systemFont(10);
+    dot.textColor = new Color(nameColor);
+    const nm = uStack.addText(u.name);
+    nm.font = Font.mediumSystemFont(10);
+    nm.textColor = new Color("#e8eaf0");
+    uStack.addSpacer(4);
+    const amt = uStack.addText(fmt(u.month_total));
+    amt.font = Font.systemFont(10);
+    amt.textColor = new Color("#8b8fa3");
+    uStack.addSpacer();
+    const lastAdded = uStack.addText(timeAgo(u.last_added_at));
+    lastAdded.font = Font.systemFont(9);
+    lastAdded.textColor = u.days_since_last !== null && u.days_since_last <= 1
+      ? new Color("#00cec9") : new Color("#ff6b6b");
+  }
+
+  w.addSpacer(4);
+
+  // Top categories
+  const catStack = w.addStack();
+  catStack.layoutHorizontally();
+  for (const cat of d.top_categories.slice(0, 3)) {
+    const cs = catStack.addStack();
+    cs.layoutHorizontally();
+    cs.centerAlignContent();
+    cs.setPadding(2, 6, 2, 6);
+    cs.cornerRadius = 4;
+    cs.backgroundColor = new Color("#1a1d27");
+    const ct = cs.addText(cat.category.substring(0, 6) + " " + fmt(cat.total));
+    ct.font = Font.systemFont(8);
+    ct.textColor = new Color("#8b8fa3");
+    catStack.addSpacer(4);
+  }
+
+  if (config.runsInWidget) {
+    Script.setWidget(w);
+  } else {
+    await w.presentMedium();
+  }
+} catch (e) {
+  const w = new ListWidget();
+  w.backgroundColor = new Color("#0f1117");
+  const err = w.addText("Error: " + e.message);
+  err.font = Font.systemFont(11);
+  err.textColor = new Color("#ff6b6b");
+  if (config.runsInWidget) Script.setWidget(w);
+  else await w.presentMedium();
+}
+
+Script.complete();`}</pre>
         </div>
       )}
     </div>

@@ -157,7 +157,59 @@ export default function Dashboard() {
       {pace && (isUnderBudget || isOverBudget) && (
         <div className={`corgi-mascot ${isUnderBudget ? 'happy' : 'sad'}`}>
           <div className="corgi-icon">
-            {isUnderBudget ? '\uD83D\uDC36' : '\uD83D\uDE1E\uD83D\uDC36'}
+            <svg viewBox="0 0 64 64" width="48" height="48" className="corgi-svg">
+              {/* Corgi body */}
+              <ellipse cx="32" cy="42" rx="18" ry="10" fill={isUnderBudget ? '#f0c36d' : '#d4a84b'} />
+              {/* Corgi butt (fluffy) */}
+              <ellipse cx="48" cy="42" rx="6" ry="8" fill={isUnderBudget ? '#e8b85a' : '#c99a3d'} />
+              {/* Tail */}
+              <path d={isUnderBudget ? 'M52 36 Q58 28 56 22' : 'M52 42 Q56 46 54 50'} stroke={isUnderBudget ? '#d4a030' : '#c99a3d'} strokeWidth="3" fill="none" strokeLinecap="round" className={isUnderBudget ? 'corgi-tail-wag' : ''} />
+              {/* Front legs */}
+              <rect x="20" y="48" width="4" height="10" rx="2" fill={isUnderBudget ? '#f0c36d' : '#d4a84b'} />
+              <rect x="28" y="48" width="4" height="10" rx="2" fill={isUnderBudget ? '#f0c36d' : '#d4a84b'} />
+              {/* Back legs */}
+              <rect x="38" y="48" width="4" height="10" rx="2" fill={isUnderBudget ? '#e8b85a' : '#c99a3d'} />
+              <rect x="44" y="48" width="4" height="10" rx="2" fill={isUnderBudget ? '#e8b85a' : '#c99a3d'} />
+              {/* Head */}
+              <circle cx="16" cy="32" r="12" fill={isUnderBudget ? '#f0c36d' : '#d4a84b'} />
+              {/* Ears */}
+              <ellipse cx="8" cy="22" rx="5" ry="8" fill={isUnderBudget ? '#d4a030' : '#b8892e'} transform="rotate(-15 8 22)" />
+              <ellipse cx="24" cy="22" rx="5" ry="8" fill={isUnderBudget ? '#d4a030' : '#b8892e'} transform="rotate(15 24 22)" />
+              {/* Inner ears */}
+              <ellipse cx="8" cy="23" rx="3" ry="5" fill="#f5d6a0" transform="rotate(-15 8 23)" />
+              <ellipse cx="24" cy="23" rx="3" ry="5" fill="#f5d6a0" transform="rotate(15 24 23)" />
+              {/* White face marking */}
+              <ellipse cx="16" cy="36" rx="6" ry="5" fill="#fff5e0" />
+              {/* Eyes */}
+              {isUnderBudget ? (
+                <>
+                  <circle cx="12" cy="30" r="2.5" fill="#2d3436" />
+                  <circle cx="20" cy="30" r="2.5" fill="#2d3436" />
+                  <circle cx="12.8" cy="29.2" r="0.8" fill="white" />
+                  <circle cx="20.8" cy="29.2" r="0.8" fill="white" />
+                </>
+              ) : (
+                <>
+                  {/* Sad eyes - slightly droopy */}
+                  <ellipse cx="12" cy="31" rx="2.5" ry="2" fill="#2d3436" />
+                  <ellipse cx="20" cy="31" rx="2.5" ry="2" fill="#2d3436" />
+                  <line x1="9" y1="28" x2="13" y2="29.5" stroke="#2d3436" strokeWidth="1" strokeLinecap="round" />
+                  <line x1="23" y1="28" x2="19" y2="29.5" stroke="#2d3436" strokeWidth="1" strokeLinecap="round" />
+                </>
+              )}
+              {/* Nose */}
+              <ellipse cx="16" cy="35" rx="2" ry="1.5" fill="#2d3436" />
+              {/* Mouth */}
+              {isUnderBudget ? (
+                <path d="M13 37 Q16 40 19 37" stroke="#2d3436" strokeWidth="1" fill="none" strokeLinecap="round" />
+              ) : (
+                <path d="M13 39 Q16 37 19 39" stroke="#2d3436" strokeWidth="1" fill="none" strokeLinecap="round" />
+              )}
+              {/* Tongue (happy only) */}
+              {isUnderBudget && <ellipse cx="16" cy="40" rx="2" ry="2.5" fill="#ff7675" />}
+              {/* White chest */}
+              <ellipse cx="22" cy="44" rx="5" ry="4" fill="#fff5e0" />
+            </svg>
           </div>
           <div className="corgi-msg">
             {isUnderBudget ? (

@@ -10,7 +10,6 @@ export const CATEGORY_COLORS = {
   'Clothing': '#e17055',
   'Personal Care': '#fab1a0',
   'Subscriptions': '#74b9ff',
-  'Pets': '#fdcb6e',
   'Gifts': '#e84393',
   'Education': '#0984e3',
   'Home': '#6c5ce7',
@@ -26,7 +25,7 @@ export const USER_COLORS = {
 export const CATEGORIES = [
   'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
   'Entertainment', 'Health', 'Clothing', 'Personal Care', 'Subscriptions',
-  'Pets', 'Gifts', 'Education', 'Home', 'Mortgage', 'Other'
+  'Gifts', 'Education', 'Home', 'Mortgage', 'Other'
 ];
 
 export function getCategoryColor(category) {

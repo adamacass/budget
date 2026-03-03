@@ -47,7 +47,7 @@
   --cat-clothing: #e17055;
   --cat-personal: #fab1a0;
   --cat-subscriptions: #74b9ff;
-  --cat-pets: #fdcb6e;
+
   --cat-gifts: #e84393;
   --cat-education: #0984e3;
   --cat-home: #6c5ce7;
@@ -102,7 +102,7 @@
   --cat-clothing: #d63031;
   --cat-personal: #e17055;
   --cat-subscriptions: #0984e3;
-  --cat-pets: #fdcb6e;
+
   --cat-gifts: #e84393;
   --cat-education: #0984e3;
   --cat-home: #6c5ce7;
@@ -1758,10 +1758,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border: 1px solid rgba(255, 107, 107, 0.3);
 }
 .corgi-icon {
-  font-size: 2rem;
-  line-height: 1;
   flex-shrink: 0;
   animation: corgiWag 1s ease-in-out infinite alternate;
+}
+.corgi-svg {
+  display: block;
+}
+.corgi-tail-wag {
+  animation: corgiTailWag 0.4s ease-in-out infinite alternate;
+  transform-origin: 52px 36px;
 }
 .corgi-mascot.sad .corgi-icon {
   animation: corgiDroop 2s ease-in-out infinite alternate;
@@ -1788,6 +1793,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 @keyframes corgiDroop {
   from { transform: translateY(0); }
   to { transform: translateY(3px); }
+}
+@keyframes corgiTailWag {
+  from { transform: rotate(-15deg); }
+  to { transform: rotate(15deg); }
 }
 
 /* ===== Categorisation Mode ===== */

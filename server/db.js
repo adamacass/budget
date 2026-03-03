@@ -150,6 +150,14 @@ async function initSchema() {
       deleted_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(description, amount, expense_date, user_id)
     );
+
+    CREATE TABLE IF NOT EXISTS category_rules (
+      id SERIAL PRIMARY KEY,
+      supplier_pattern TEXT NOT NULL UNIQUE,
+      category TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   // Log existing data counts for diagnostics
@@ -201,6 +209,10 @@ async function initSchema() {
   if (parseInt(budgetCount) === 0) {
     await seedCategoryBudgets();
   }
+
+  // Migrate Pets → Other (category removed)
+  await pool.query("UPDATE expenses SET category = 'Other' WHERE category = 'Pets'");
+  await pool.query("DELETE FROM category_budgets WHERE category = 'Pets'");
 }
 
 async function seedCategoryBudgets() {
@@ -208,8 +220,8 @@ async function seedCategoryBudgets() {
     ['Groceries', 800], ['Dining Out', 200], ['Transport', 200],
     ['Utilities', 250], ['Insurance', 200], ['Entertainment', 100],
     ['Health', 100], ['Clothing', 80], ['Personal Care', 60],
-    ['Subscriptions', 50], ['Pets', 50], ['Gifts', 50],
-    ['Education', 50], ['Home', 100], ['Other', 100]
+    ['Subscriptions', 50], ['Gifts', 50],
+    ['Education', 50], ['Home', 100], ['Other', 150]
   ];
   for (const [cat, amt] of conservativeBudgets) {
     await pool.query('INSERT INTO category_budgets (category, monthly_amount) VALUES ($1, $2) ON CONFLICT (category) DO NOTHING', [cat, amt]);
@@ -217,8 +229,14 @@ async function seedCategoryBudgets() {
   console.log('Category budgets seeded (conservative / high-savings): $' + conservativeBudgets.reduce((s, b) => s + b[1], 0) + '/mo');
 }
 
-function autoCategorizeTxn(desc) {
+function autoCategorizeTxn(desc, learnedRules) {
   const d = desc.toLowerCase();
+  // Check learned category rules first (user-taught mappings)
+  if (learnedRules && learnedRules.length > 0) {
+    for (const rule of learnedRules) {
+      if (d.includes(rule.supplier_pattern.toLowerCase())) return rule.category;
+    }
+  }
   if (/woolworths|coles|aldi|iga|harris farm|market|grocer|fruit|butcher|bakers delight|pasture/.test(d)) return 'Groceries';
   if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch|sushi|thai|greek|chinese|banh mi|crepe|roast|grill|souvla|rooster|boost juice|rowers|cellars|liquorland|surf club|canteen|noodles|janus bar|artistry garden/.test(d)) return 'Dining Out';
   if (/uber|lyft|taxi|cabcharge|opal|linkt|toll|parking|fuel|petrol|bp\s|shell|caltex|ampol|7-?eleven|rego|rms|nrma|car\s?wash|transportfornsw|taxipay|syd aprt|carp50/.test(d)) return 'Transport';
@@ -229,7 +247,6 @@ function autoCategorizeTxn(desc) {
   if (/pharmacy|chemist|doctor|gp\s|medical|dental|dentist|physio|gym|fitness|pool|yoga|pilates|health|fitness first/.test(d)) return 'Health';
   if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe|universal store|rebel|institchu|mens biz/.test(d)) return 'Clothing';
   if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav|fade out/.test(d)) return 'Personal Care';
-  if (/pet|vet|petbarn|petsmart|pet circle|animal/.test(d)) return 'Pets';
   if (/gift|flower|present|hamper|salvation army|gofundme/.test(d)) return 'Gifts';
   if (/course|book|udemy|education|tutor|uni|school|tafe|dymocks/.test(d)) return 'Education';
   if (/bunnings|ikea|officeworks|furniture|homeware|hardware|garden|plumb|electr|temple.*webster|mocka|ruggable|bed bath|kogan|supercheap auto|chuck trailer/.test(d)) return 'Home';
@@ -581,4 +598,13 @@ async function seedStatementData() {
   }
 }
 
-module.exports = { getDb, autoCategorizeTxn };
+async function getCategoryRules() {
+  try {
+    const { rows } = await pool.query('SELECT supplier_pattern, category FROM category_rules ORDER BY id');
+    return rows;
+  } catch (err) {
+    return [];
+  }
+}
+
+module.exports = { getDb, autoCategorizeTxn, getCategoryRules };

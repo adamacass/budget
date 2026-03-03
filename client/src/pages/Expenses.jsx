@@ -8,7 +8,7 @@ const SYDNEY_RANGES = {
   Groceries: [200, 300], 'Dining Out': [50, 125], Transport: [50, 100],
   Utilities: [75, 115], Insurance: [50, 90], Entertainment: [35, 75],
   Health: [35, 75], Clothing: [25, 65], 'Personal Care': [20, 40],
-  Subscriptions: [15, 40], Pets: [15, 50], Gifts: [15, 50]
+  Subscriptions: [15, 40], Gifts: [15, 50]
 };
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }

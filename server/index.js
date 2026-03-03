@@ -5,7 +5,7 @@ const path = require('path');
 const bcrypt = require('bcryptjs');
 const cron = require('node-cron');
 const XLSX = require('xlsx');
-const { getDb, autoCategorizeTxn } = require('./db');
+const { getDb, autoCategorizeTxn, getCategoryRules } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
 const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = require('./claude');
 
@@ -173,7 +173,7 @@ app.delete('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) =>
 
 // Update expense (full inline editing — category, description, amount, date, subcategory, recurring)
 app.put('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
-  const { category, description, amount, expense_date, subcategory, recurring } = req.body;
+  const { category, description, amount, expense_date, subcategory, recurring, learn_category } = req.body;
   const db = await getDb();
   const updates = [];
   const params = [];
@@ -187,8 +187,64 @@ app.put('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
   if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
   params.push(req.params.id);
   await db.query(`UPDATE expenses SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
+
+  // Learn category rule: extract a supplier pattern from the description and save
+  if (category && category !== 'Other') {
+    const expense = (await db.query('SELECT description FROM expenses WHERE id = $1', [req.params.id])).rows[0];
+    if (expense?.description) {
+      const pattern = extractSupplierPattern(expense.description);
+      if (pattern && pattern.length >= 3) {
+        await db.query(
+          'INSERT INTO category_rules (supplier_pattern, category, created_by) VALUES ($1, $2, $3) ON CONFLICT (supplier_pattern) DO UPDATE SET category = $2',
+          [pattern, category, req.user.id]
+        );
+      }
+    }
+  }
+
   const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [req.params.id])).rows[0];
   res.json(expense);
+}));
+
+// Extract a normalized supplier pattern from a transaction description
+function extractSupplierPattern(desc) {
+  if (!desc) return null;
+  // Remove common suffixes like locations, states, country codes
+  let pattern = desc
+    .replace(/\s+(NSW|VIC|QLD|SA|WA|TAS|NT|ACT|Aus|Eng|Deu|Irl|Ca|Ns)\s*$/gi, '')
+    .replace(/\s+(Sydney|Melbourne|Brisbane|Perth|Adelaide|Mosman|Chatswood|Mascot|San Francisco)\s*/gi, ' ')
+    .replace(/\s+\d+\s*$/, '')  // trailing numbers
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  // Take the first meaningful words (the supplier name)
+  const words = pattern.split(/\s+/);
+  // Use at most the first 3 meaningful words as the pattern
+  const meaningful = words.slice(0, Math.min(3, words.length)).join(' ');
+  return meaningful.length >= 3 ? meaningful.toLowerCase() : null;
+}
+
+// ===================== CATEGORY RULES (learned mappings) =====================
+
+app.get('/api/category-rules', authMiddleware, asyncHandler(async (req, res) => {
+  const rules = await getCategoryRules();
+  res.json(rules);
+}));
+
+app.post('/api/category-rules', authMiddleware, asyncHandler(async (req, res) => {
+  const { supplier_pattern, category } = req.body;
+  if (!supplier_pattern || !category) return res.status(400).json({ error: 'supplier_pattern and category required' });
+  const db = await getDb();
+  await db.query(
+    'INSERT INTO category_rules (supplier_pattern, category, created_by) VALUES ($1, $2, $3) ON CONFLICT (supplier_pattern) DO UPDATE SET category = $2',
+    [supplier_pattern.toLowerCase(), category, req.user.id]
+  );
+  res.json({ message: 'Rule saved', supplier_pattern, category });
+}));
+
+app.delete('/api/category-rules/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  await db.query('DELETE FROM category_rules WHERE id = $1', [req.params.id]);
+  res.json({ message: 'Rule deleted' });
 }));
 
 // Check for potential duplicates before importing
@@ -517,11 +573,14 @@ app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, r
 
 // ===================== CREDIT CARD STATEMENT IMPORT =====================
 
-app.post('/api/statements/parse', authMiddleware, (req, res) => {
+app.post('/api/statements/parse', authMiddleware, asyncHandler(async (req, res) => {
   const { csv_text } = req.body;
   if (!csv_text || !csv_text.trim()) {
     return res.status(400).json({ error: 'No CSV data provided' });
   }
+
+  // Load learned category rules for auto-categorization
+  const learnedRules = await getCategoryRules();
 
   const lines = csv_text.trim().split('\n');
   if (lines.length < 2) {
@@ -592,8 +651,8 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
       continue;
     }
 
-    // Auto-categorize based on description
-    const category = autoCategorizeTxn(description);
+    // Auto-categorize based on description (learned rules first, then built-in)
+    const category = autoCategorizeTxn(description, learnedRules);
 
     transactions.push({
       expense_date: parsedDate,
@@ -606,7 +665,7 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
   }
 
   res.json({ transactions, income_transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
-});
+}));
 
 app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res) => {
   const { transactions } = req.body;
@@ -731,10 +790,11 @@ app.post('/api/screenshots/extract', authMiddleware, asyncHandler(async (req, re
     const result = await extractTransactionsFromImage(image, media_type || 'image/png');
     if (result.error) return res.status(500).json({ error: result.error });
 
-    // Auto-categorize each extracted transaction
+    // Auto-categorize each extracted transaction (using learned rules)
+    const learnedRules = await getCategoryRules();
     const categorized = result.transactions.map(t => ({
       ...t,
-      category: autoCategorizeTxn(t.description)
+      category: autoCategorizeTxn(t.description, learnedRules)
     }));
 
     res.json({ transactions: categorized });
@@ -1168,7 +1228,6 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
     clothing: { low: 80, mid: 150, high: 250, label: 'Clothing' },
     personal_care: { low: 60, mid: 100, high: 150, label: 'Personal Care' },
     subscriptions: { low: 50, mid: 100, high: 150, label: 'Subscriptions' },
-    pets: { low: 50, mid: 100, high: 200, label: 'Pets' },
     gifts: { low: 50, mid: 100, high: 200, label: 'Gifts' }
   };
 
@@ -1219,6 +1278,77 @@ cron.schedule('0 11 * * *', async () => {
     console.error('Nightly summary error:', err.message);
   }
 });
+
+// ===================== WIDGET API (for Scriptable / iPhone) =====================
+
+app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const today = new Date().toISOString().split('T')[0];
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+
+  const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+  const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
+  const todayExpenses = (await db.query('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date = $1', [today])).rows[0];
+
+  // Budget data
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
+  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
+  const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
+  const monthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+  const weeklyBudget = monthlyBudget * 12 / 52;
+
+  const daysElapsed = Math.max(1, Math.floor((Date.now() - new Date(thirtyDaysAgo + 'T00:00:00').getTime()) / 86400000));
+  const totalMonth = parseFloat(monthlyExpenses.total) || 0;
+  const dailyAvg = totalMonth / daysElapsed;
+  const projectedMonthly = dailyAvg * 30;
+  const pacePercent = monthlyBudget > 0 ? Math.round((projectedMonthly / monthlyBudget) * 100) : 0;
+
+  // Per-user last expense tracking
+  const users = (await db.query('SELECT id, display_name, username FROM users')).rows;
+  const userActivity = [];
+  for (const u of users) {
+    const lastExpense = (await db.query('SELECT expense_date, created_at FROM expenses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [u.id])).rows[0];
+    const monthCount = (await db.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
+    const monthTotal = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
+    const daysSince = lastExpense?.created_at
+      ? Math.floor((Date.now() - new Date(lastExpense.created_at).getTime()) / 86400000)
+      : null;
+    userActivity.push({
+      name: u.display_name,
+      last_expense_date: lastExpense?.expense_date || null,
+      last_added_at: lastExpense?.created_at || null,
+      days_since_last: daysSince,
+      month_count: parseInt(monthCount.cnt),
+      month_total: parseFloat(monthTotal.total) || 0,
+    });
+  }
+
+  // Top 3 categories this month
+  const topCategories = (await db.query(
+    'SELECT category, SUM(amount) as total FROM expenses WHERE expense_date >= $1 GROUP BY category ORDER BY total DESC LIMIT 3',
+    [thirtyDaysAgo]
+  )).rows.map(r => ({ category: r.category, total: parseFloat(r.total) }));
+
+  // Offset balance
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1", ['offset'])).rows[0];
+
+  res.json({
+    today_spent: parseFloat(todayExpenses.total) || 0,
+    today_count: parseInt(todayExpenses.count),
+    week_spent: parseFloat(weeklyExpenses.total) || 0,
+    month_spent: totalMonth,
+    daily_average: Math.round(dailyAvg),
+    projected_monthly: Math.round(projectedMonthly),
+    monthly_budget: Math.round(monthlyBudget),
+    weekly_budget: Math.round(weeklyBudget),
+    pace_percent: pacePercent,
+    under_budget: pacePercent <= 100,
+    offset_balance: offsetRow ? offsetRow.balance : 0,
+    top_categories: topCategories,
+    users: userActivity,
+  });
+}));
 
 // SPA fallback
 if (process.env.NODE_ENV === 'production') {

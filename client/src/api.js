@@ -95,6 +95,14 @@ export const parseStatement = (csv_text) => apiFetch('/api/statements/parse', { 
 export const importStatement = (transactions) => apiFetch('/api/statements/import', { method: 'POST', body: JSON.stringify({ transactions }) });
 export const checkDuplicates = (transactions) => apiFetch('/api/expenses/check-duplicates', { method: 'POST', body: JSON.stringify({ transactions }) });
 
+// Category Rules (learned mappings)
+export const getCategoryRules = () => apiFetch('/api/category-rules');
+export const saveCategoryRule = (supplier_pattern, category) => apiFetch('/api/category-rules', { method: 'POST', body: JSON.stringify({ supplier_pattern, category }) });
+export const deleteCategoryRule = (id) => apiFetch(`/api/category-rules/${id}`, { method: 'DELETE' });
+
+// Widget
+export const getWidgetData = () => apiFetch('/api/widget');
+
 // Projections
 export const getProjections = () => apiFetch('/api/projections');
 
