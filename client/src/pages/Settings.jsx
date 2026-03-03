@@ -714,38 +714,15 @@ Script.complete();`}</pre>
 
       {tab === 'shortcuts' && (
         <div className="card">
-          <div className="card-title"><Smartphone size={14} /> iOS Shortcuts — Auto-Record from Notifications</div>
+          <div className="card-title"><Smartphone size={14} /> iOS Shortcuts — Quick Add Expenses</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-            Automatically record expenses when your bank sends a push notification. Uses the iOS Shortcuts app
-            with a <strong>Personal Automation</strong> triggered by notifications.
+            Quickly record expenses from your iPhone using Siri or the Shortcuts app.
+            The app auto-categorises using your learned category rules.
           </p>
 
           <div style={{ marginBottom: '1rem' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>How it Works</h4>
-            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.7 }}>
-              When your bank app sends a notification like <em>"You spent $42.50 at Woolworths"</em>,
-              the Shortcut extracts the amount and description, then calls your budget app's Quick Add API.
-              The app auto-categorises the expense using your learned category rules.
-            </p>
-          </div>
-
-          <div style={{ marginBottom: '1rem' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Setup Instructions</h4>
-            <ol style={{ fontSize: '0.82rem', lineHeight: 2, paddingLeft: '1.25rem', color: 'var(--text-muted)' }}>
-              <li>Open the <strong>Shortcuts</strong> app on your iPhone</li>
-              <li>Tap <strong>Automation</strong> tab at the bottom</li>
-              <li>Tap <strong>+</strong> → <strong>Create Personal Automation</strong></li>
-              <li>Scroll down and choose <strong>Notification</strong></li>
-              <li>Select your <strong>bank app</strong> (e.g. CommBank, Westpac, ANZ, NAB)</li>
-              <li>Choose <strong>"Contains"</strong> and enter a keyword like <code>spent</code> or <code>purchase</code></li>
-              <li>Tap <strong>Next</strong>, then add the actions below in order</li>
-              <li>Turn <strong>OFF</strong> "Ask Before Running" so it runs automatically</li>
-            </ol>
-          </div>
-
-          <div style={{ marginBottom: '1rem' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Your API Endpoint</h4>
-            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Your API Details</h4>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
               <code style={{ fontSize: '0.7rem', padding: '0.5rem', background: 'var(--bg-input)', borderRadius: 6, wordBreak: 'break-all' }}>
                 POST {window.location.origin}/api/quick-add
               </code>
@@ -756,10 +733,6 @@ Script.complete();`}</pre>
                 <Copy size={14} /> Copy URL
               </button>
             </div>
-          </div>
-
-          <div style={{ marginBottom: '1rem' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Auth Token</h4>
             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
               <code style={{ fontSize: '0.7rem', padding: '0.5rem', background: 'var(--bg-input)', borderRadius: 6, wordBreak: 'break-all', flex: 1 }}>
                 {localStorage.getItem('token')?.substring(0, 40)}...
@@ -768,51 +741,69 @@ Script.complete();`}</pre>
                 navigator.clipboard.writeText(localStorage.getItem('token') || '');
                 alert('Token copied');
               }}>
-                <Copy size={14} /> Copy
+                <Copy size={14} /> Copy Token
               </button>
             </div>
           </div>
 
-          <div style={{ marginBottom: '1rem' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Shortcut Actions (step by step)</h4>
+          {/* ===== OPTION 1: Siri Shortcut ===== */}
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h4 style={{ fontSize: '0.95rem', marginBottom: '0.5rem', color: 'var(--text)' }}>Option 1: "Hey Siri, add expense"</h4>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.5rem', lineHeight: 1.6 }}>
+              Create a Shortcut you can trigger with Siri. It asks for amount and description,
+              then records the expense. Best for on-the-go after tapping your card.
+            </p>
             <div style={{ background: 'var(--bg-input)', borderRadius: 8, padding: '1rem', fontSize: '0.8rem', lineHeight: 1.9 }}>
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Action 1: Get text from Shortcut Input</p>
-              <p style={{ color: 'var(--text-muted)' }}>This gives you the notification body text.</p>
-
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 2: Match Text</p>
-              <p style={{ color: 'var(--text-muted)' }}>Pattern: <code style={{ background: 'var(--bg-card)', padding: '2px 6px', borderRadius: 4 }}>\$[\d,.]+</code></p>
-              <p style={{ color: 'var(--text-muted)' }}>Input: <em>Text from Step 1</em></p>
-
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 3: Get Item from List</p>
-              <p style={{ color: 'var(--text-muted)' }}>Get <strong>First Item</strong> from <em>Matches from Step 2</em></p>
-
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 4: Replace Text</p>
-              <p style={{ color: 'var(--text-muted)' }}>Find <code>$</code> and <code>,</code> — replace with nothing. This gives you the raw number.</p>
-
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 5: Get Contents of URL</p>
-              <p style={{ color: 'var(--text-muted)' }}>
+              <p style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Setup:</p>
+              <ol style={{ paddingLeft: '1.25rem', color: 'var(--text-muted)', margin: 0 }}>
+                <li>Open <strong>Shortcuts</strong> → tap <strong>+</strong></li>
+                <li>Name it <strong>"Add Expense"</strong></li>
+                <li>Add action: <strong>Ask for Input</strong> → Type: Number → Prompt: "Amount?"</li>
+                <li>Add action: <strong>Ask for Input</strong> → Type: Text → Prompt: "What for?"</li>
+                <li>Add action: <strong>Get Contents of URL</strong></li>
+              </ol>
+              <p style={{ fontWeight: 600, marginTop: '0.75rem', marginBottom: '0.25rem' }}>URL action settings:</p>
+              <p style={{ color: 'var(--text-muted)', margin: 0 }}>
                 URL: <code style={{ background: 'var(--bg-card)', padding: '2px 6px', borderRadius: 4 }}>{window.location.origin}/api/quick-add</code><br/>
                 Method: <strong>POST</strong><br/>
-                Headers: <code>Authorization</code> = <code>Bearer YOUR_TOKEN</code><br/>
-                Headers: <code>Content-Type</code> = <code>application/json</code><br/>
-                Body (JSON):<br/>
-                <code style={{ background: 'var(--bg-card)', padding: '4px 8px', borderRadius: 4, display: 'inline-block', marginTop: 4 }}>
-                  {`{"amount": [Result from Step 4], "description": [Text from Step 1]}`}
-                </code>
+                Header: <code>Authorization</code> = <code>Bearer YOUR_TOKEN</code><br/>
+                Header: <code>Content-Type</code> = <code>application/json</code><br/>
+                Body (JSON): <code>{`{"amount": [Input 1], "description": [Input 2]}`}</code>
               </p>
-
-              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 6 (Optional): Show Notification</p>
-              <p style={{ color: 'var(--text-muted)' }}>
-                Title: "Budget recorded"<br/>
-                Body: <em>Result from Step 5</em> — this will show the category it was auto-assigned to.
+              <p style={{ fontWeight: 600, marginTop: '0.75rem', marginBottom: '0.25rem' }}>Optional:</p>
+              <p style={{ color: 'var(--text-muted)', margin: 0 }}>
+                Add <strong>Show Notification</strong> with the result to confirm the category it was auto-assigned to.
               </p>
             </div>
           </div>
 
+          {/* ===== OPTION 2: Apple Pay Automation ===== */}
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h4 style={{ fontSize: '0.95rem', marginBottom: '0.5rem', color: 'var(--text)' }}>Option 2: Apple Pay Automation</h4>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.5rem', lineHeight: 1.6 }}>
+              If you pay with Apple Pay, iOS can trigger a shortcut when you tap your card.
+              Note: this only works for Apple Wallet transactions, not regular bank card taps.
+            </p>
+            <div style={{ background: 'var(--bg-input)', borderRadius: 8, padding: '1rem', fontSize: '0.8rem', lineHeight: 1.9 }}>
+              <ol style={{ paddingLeft: '1.25rem', color: 'var(--text-muted)', margin: 0 }}>
+                <li>Open <strong>Shortcuts</strong> → <strong>Automation</strong> tab</li>
+                <li>Tap <strong>+</strong> → <strong>Transaction</strong></li>
+                <li>Select your Apple Pay card</li>
+                <li>Set to <strong>Run Immediately</strong></li>
+                <li>Add action: <strong>Ask for Input</strong> → Number → "How much was that?"</li>
+                <li>Add action: <strong>Get Contents of URL</strong> (same setup as Option 1)</li>
+              </ol>
+              <p style={{ color: 'var(--text-muted)', marginTop: '0.5rem', fontSize: '0.75rem' }}>
+                Note: On iOS 18 this trigger can be flaky. If it doesn't fire, try disabling "Summarize Notifications" in Settings → Notifications → Wallet.
+              </p>
+            </div>
+          </div>
+
+          {/* ===== OPTION 3: Quick Test ===== */}
           <div style={{ marginBottom: '0.5rem' }}>
             <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Quick Test (cURL)</h4>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-              Test the API from your terminal to make sure it works:
+              Test the Quick Add API from your terminal:
             </p>
             <pre style={{ fontSize: '0.65rem', padding: '0.75rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`curl -X POST ${window.location.origin}/api/quick-add \\
   -H "Authorization: Bearer YOUR_TOKEN" \\
