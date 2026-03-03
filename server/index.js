@@ -161,13 +161,15 @@ app.delete('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) =>
   const db = await getDb();
   // Record deletion for persistent memory (prevent re-import)
   const expense = (await db.query('SELECT * FROM expenses WHERE id = $1', [req.params.id])).rows[0];
-  if (expense) {
-    await db.query(
-      'INSERT INTO deleted_expenses (description, amount, expense_date, user_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [expense.description, expense.amount, expense.expense_date, expense.user_id]
-    );
+  if (!expense) {
+    return res.status(404).json({ error: 'Expense not found' });
   }
-  await db.query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+  await db.query(
+    'INSERT INTO deleted_expenses (description, amount, expense_date, user_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+    [expense.description, expense.amount, expense.expense_date, expense.user_id]
+  );
+  // Household app: any authenticated user can delete any expense
+  await db.query('DELETE FROM expenses WHERE id = $1', [req.params.id]);
   res.json({ message: 'Deleted' });
 }));
 

@@ -137,9 +137,11 @@ export default function Expenses() {
 
   async function handleDelete(id) {
     if (!confirm('Delete this expense?')) return;
-    await deleteExpense(id);
-    setExpenses(prev => prev.filter(e => e.id !== id));
-    loadSummary();
+    try {
+      await deleteExpense(id);
+      setExpenses(prev => prev.filter(e => e.id !== id));
+      loadSummary();
+    } catch (err) { alert('Delete failed: ' + err.message); }
   }
 
   // ===== INLINE EDITING =====
