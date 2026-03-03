@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const cron = require('node-cron');
 const XLSX = require('xlsx');
 const { getDb, autoCategorizeTxn, getCategoryRules } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
@@ -1284,31 +1283,6 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
     message
   });
 }));
-
-// Nightly cron job for Claude summary (runs at 9pm AEST = 11:00 UTC)
-cron.schedule('0 11 * * *', async () => {
-  console.log('Running nightly Claude summary...');
-  try {
-    const db = await getDb();
-    const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
-    const today = new Date().toISOString().split('T')[0];
-    const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
-    const incomes = (await db.query('SELECT * FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows;
-    const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-    const accountBalances = {};
-    for (const acct of accounts) {
-      const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
-      accountBalances[acct] = row ? row.balance : 0;
-    }
-    const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
-    const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
-    const result = await getNightlySummary({ expenses, incomes, accountBalances, goals, levers, period: `${thirtyDaysAgo} to ${today}` });
-    await db.query('INSERT INTO claude_advice (advice_type, content) VALUES ($1, $2)', ['nightly', result.summary]);
-    console.log('Nightly summary saved.');
-  } catch (err) {
-    console.error('Nightly summary error:', err.message);
-  }
-});
 
 // ===================== WIDGET API (for Scriptable / iPhone) =====================
 

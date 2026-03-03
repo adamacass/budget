@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getDashboard, getInsights, getLatestAdvice, addExpense, extractScreenshot, importScreenshot, getDailySpending } from '../api';
+import { getDashboard, getInsights, addExpense, extractScreenshot, importScreenshot, getDailySpending } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
 import { useNavigate } from 'react-router-dom';
@@ -14,7 +14,6 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [insights, setInsights] = useState(null);
-  const [advice, setAdvice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dismissedBanner, setDismissedBanner] = useState(false);
 
@@ -40,8 +39,8 @@ export default function Dashboard() {
   const fileInputRef = useRef(null);
 
   function loadAll() {
-    Promise.all([getDashboard(), getInsights(), getLatestAdvice('nightly')])
-      .then(([d, i, a]) => { setData(d); setInsights(i); setAdvice(a); })
+    Promise.all([getDashboard(), getInsights()])
+      .then(([d, i]) => { setData(d); setInsights(i); })
       .catch(console.error)
       .finally(() => setLoading(false));
   }
@@ -695,12 +694,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {advice?.content && (
-        <div className="advice-box">
-          <h3>Claude's Latest Summary</h3>
-          {advice.content}
-        </div>
-      )}
     </div>
   );
 }
