@@ -391,8 +391,8 @@ export default function Settings() {
               <Copy size={14} /> Copy Code
             </button>
           </div>
-          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Budget Corgi Widget for Scriptable
-// Beautiful widget with drawn corgi, week-vs-week comparison, and sparkline
+          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Adam + Aruto Budget Widget for Scriptable
+// With corgi mascot, week-vs-week, sparkline, and per-user comparison
 
 const BASE_URL = "${window.location.origin}";
 const TOKEN = "PASTE_YOUR_TOKEN_HERE";
@@ -405,127 +405,137 @@ async function fetchWidget() {
 
 function fmt(n) { return "$" + Math.round(n).toLocaleString(); }
 
-function drawCorgi(ctx, x, y, size, happy) {
-  // Golden corgi body
-  const s = size / 50;
-  // Body
-  ctx.setFillColor(new Color("#D4943A"));
-  ctx.fillEllipse(new Rect(x + 8*s, y + 18*s, 34*s, 22*s));
-  // Head
-  ctx.fillEllipse(new Rect(x + 2*s, y + 8*s, 22*s, 20*s));
-  // White face marking
+function timeAgo(dateStr, daysSince) {
+  if (daysSince === null || daysSince === undefined) return "never";
+  if (daysSince === 0) return "today";
+  if (daysSince === 1) return "yesterday";
+  return daysSince + "d ago";
+}
+
+function drawCorgi(ctx, x, y, s, happy) {
+  // Body (rounded loaf shape)
+  ctx.setFillColor(new Color("#E8A832"));
+  ctx.fillEllipse(new Rect(x + 6*s, y + 12*s, 28*s, 16*s));
+  // Fluffy butt
+  ctx.fillEllipse(new Rect(x + 28*s, y + 11*s, 10*s, 14*s));
+  // White belly
   ctx.setFillColor(new Color("#FFF5E0"));
-  ctx.fillEllipse(new Rect(x + 6*s, y + 14*s, 14*s, 14*s));
-  // Left ear
-  ctx.setFillColor(new Color("#C4842A"));
-  const earPts = [
-    new Point(x + 4*s, y + 12*s),
-    new Point(x + 1*s, y + 0*s),
-    new Point(x + 12*s, y + 10*s),
-  ];
-  const ear = new Path();
-  ear.move(earPts[0]);
-  ear.addLine(earPts[1]);
-  ear.addLine(earPts[2]);
-  ear.closeSubpath();
-  ctx.addPath(ear);
-  ctx.fillPath();
+  ctx.fillEllipse(new Rect(x + 10*s, y + 18*s, 20*s, 10*s));
+  // Head
+  ctx.setFillColor(new Color("#E8A832"));
+  ctx.fillEllipse(new Rect(x + 0*s, y + 4*s, 18*s, 16*s));
+  // White face blaze
+  ctx.setFillColor(new Color("#FFF5E0"));
+  ctx.fillEllipse(new Rect(x + 4*s, y + 10*s, 10*s, 10*s));
+  // Left ear (triangle)
+  ctx.setFillColor(new Color("#D4943A"));
+  const le = new Path();
+  le.move(new Point(x + 2*s, y + 8*s));
+  le.addLine(new Point(x + 0*s, y + 0*s));
+  le.addLine(new Point(x + 8*s, y + 6*s));
+  le.closeSubpath();
+  ctx.addPath(le); ctx.fillPath();
+  // Left inner ear
+  ctx.setFillColor(new Color("#FFD0B5"));
+  const lie = new Path();
+  lie.move(new Point(x + 3*s, y + 8*s));
+  lie.addLine(new Point(x + 2*s, y + 3*s));
+  lie.addLine(new Point(x + 7*s, y + 7*s));
+  lie.closeSubpath();
+  ctx.addPath(lie); ctx.fillPath();
   // Right ear
-  const rEar = new Path();
-  rEar.move(new Point(x + 14*s, y + 12*s));
-  rEar.addLine(new Point(x + 22*s, y + 0*s));
-  rEar.addLine(new Point(x + 20*s, y + 10*s));
-  rEar.closeSubpath();
-  ctx.addPath(rEar);
-  ctx.fillPath();
-  // Inner ears
-  ctx.setFillColor(new Color("#FFBFA0"));
-  const iEar = new Path();
-  iEar.move(new Point(x + 5*s, y + 12*s));
-  iEar.addLine(new Point(x + 3*s, y + 4*s));
-  iEar.addLine(new Point(x + 10*s, y + 11*s));
-  iEar.closeSubpath();
-  ctx.addPath(iEar);
-  ctx.fillPath();
-  const iREar = new Path();
-  iREar.move(new Point(x + 15*s, y + 12*s));
-  iREar.addLine(new Point(x + 20*s, y + 4*s));
-  iREar.addLine(new Point(x + 19*s, y + 11*s));
-  iREar.closeSubpath();
-  ctx.addPath(iREar);
-  ctx.fillPath();
+  ctx.setFillColor(new Color("#D4943A"));
+  const re = new Path();
+  re.move(new Point(x + 12*s, y + 8*s));
+  re.addLine(new Point(x + 17*s, y + 0*s));
+  re.addLine(new Point(x + 16*s, y + 6*s));
+  re.closeSubpath();
+  ctx.addPath(re); ctx.fillPath();
+  // Right inner ear
+  ctx.setFillColor(new Color("#FFD0B5"));
+  const rie = new Path();
+  rie.move(new Point(x + 13*s, y + 8*s));
+  rie.addLine(new Point(x + 16*s, y + 3*s));
+  rie.addLine(new Point(x + 15*s, y + 7*s));
+  rie.closeSubpath();
+  ctx.addPath(rie); ctx.fillPath();
   // Eyes
-  ctx.setFillColor(new Color("#2d2d2d"));
-  ctx.fillEllipse(new Rect(x + 8*s, y + 17*s, 3*s, 3*s));
-  ctx.fillEllipse(new Rect(x + 15*s, y + 17*s, 3*s, 3*s));
+  ctx.setFillColor(new Color("#1a1a2e"));
+  ctx.fillEllipse(new Rect(x + 5*s, y + 11*s, 2.5*s, 2.5*s));
+  ctx.fillEllipse(new Rect(x + 11*s, y + 11*s, 2.5*s, 2.5*s));
   // Eye shine
   ctx.setFillColor(new Color("#FFFFFF"));
-  ctx.fillEllipse(new Rect(x + 9*s, y + 17.5*s, 1.2*s, 1.2*s));
-  ctx.fillEllipse(new Rect(x + 16*s, y + 17.5*s, 1.2*s, 1.2*s));
-  // Nose
-  ctx.setFillColor(new Color("#2d2d2d"));
-  ctx.fillEllipse(new Rect(x + 11*s, y + 22*s, 4*s, 3*s));
-  // Mouth / tongue
-  if (happy) {
-    ctx.setFillColor(new Color("#FF7979"));
-    ctx.fillEllipse(new Rect(x + 11.5*s, y + 25*s, 3*s, 4*s));
-  } else {
-    // Sad eyebrows
-    ctx.setStrokeColor(new Color("#2d2d2d"));
-    ctx.setLineWidth(1.5*s);
-    const lBrow = new Path();
-    lBrow.move(new Point(x + 7*s, y + 15*s));
-    lBrow.addLine(new Point(x + 11*s, y + 16*s));
-    ctx.addPath(lBrow); ctx.strokePath();
-    const rBrow = new Path();
-    rBrow.move(new Point(x + 19*s, y + 15*s));
-    rBrow.addLine(new Point(x + 15*s, y + 16*s));
-    ctx.addPath(rBrow); ctx.strokePath();
+  ctx.fillEllipse(new Rect(x + 5.8*s, y + 11.3*s, 1*s, 1*s));
+  ctx.fillEllipse(new Rect(x + 11.8*s, y + 11.3*s, 1*s, 1*s));
+  // Eyebrows (sad only)
+  if (!happy) {
+    ctx.setStrokeColor(new Color("#1a1a2e"));
+    ctx.setLineWidth(1.2*s);
+    const lb = new Path();
+    lb.move(new Point(x + 4*s, y + 10*s));
+    lb.addLine(new Point(x + 7.5*s, y + 10.8*s));
+    ctx.addPath(lb); ctx.strokePath();
+    const rb = new Path();
+    rb.move(new Point(x + 14*s, y + 10*s));
+    rb.addLine(new Point(x + 10.5*s, y + 10.8*s));
+    ctx.addPath(rb); ctx.strokePath();
   }
-  // Legs
+  // Nose
+  ctx.setFillColor(new Color("#1a1a2e"));
+  ctx.fillEllipse(new Rect(x + 7.5*s, y + 15*s, 3*s, 2*s));
+  // Tongue (happy)
+  if (happy) {
+    ctx.setFillColor(new Color("#FF7B7B"));
+    ctx.fillEllipse(new Rect(x + 8*s, y + 17*s, 2.5*s, 3.5*s));
+  } else {
+    // Frown
+    ctx.setStrokeColor(new Color("#1a1a2e"));
+    ctx.setLineWidth(0.8*s);
+    const fr = new Path();
+    fr.move(new Point(x + 7*s, y + 18.5*s));
+    fr.addCurve(new Point(x + 11*s, y + 18.5*s), new Point(x + 8*s, y + 17*s), new Point(x + 10*s, y + 17*s));
+    ctx.addPath(fr); ctx.strokePath();
+  }
+  // Front legs (stubby)
+  ctx.setFillColor(new Color("#E8A832"));
+  ctx.fillRect(new Rect(x + 8*s, y + 25*s, 4*s, 6*s));
+  ctx.fillRect(new Rect(x + 16*s, y + 25*s, 4*s, 6*s));
+  // Back legs
+  ctx.fillRect(new Rect(x + 24*s, y + 25*s, 4*s, 6*s));
+  // Paws
+  ctx.setFillColor(new Color("#FFF5E0"));
+  ctx.fillEllipse(new Rect(x + 7.5*s, y + 29*s, 5*s, 2.5*s));
+  ctx.fillEllipse(new Rect(x + 15.5*s, y + 29*s, 5*s, 2.5*s));
+  ctx.fillEllipse(new Rect(x + 23.5*s, y + 29*s, 5*s, 2.5*s));
+  // Tail
   ctx.setFillColor(new Color("#D4943A"));
-  ctx.fillRect(new Rect(x + 12*s, y + 35*s, 5*s, 8*s));
-  ctx.fillRect(new Rect(x + 22*s, y + 35*s, 5*s, 8*s));
-  ctx.fillRect(new Rect(x + 30*s, y + 35*s, 5*s, 8*s));
-  // Fluffy butt
-  ctx.fillEllipse(new Rect(x + 34*s, y + 18*s, 12*s, 16*s));
-  // Tail (wagging up for happy, down for sad)
-  ctx.setFillColor(new Color("#C4842A"));
   const tail = new Path();
   if (happy) {
-    tail.move(new Point(x + 42*s, y + 20*s));
-    tail.addCurve(new Point(x + 48*s, y + 8*s), new Point(x + 44*s, y + 14*s), new Point(x + 50*s, y + 10*s));
-    tail.addLine(new Point(x + 46*s, y + 10*s));
-    tail.addCurve(new Point(x + 42*s, y + 22*s), new Point(x + 48*s, y + 12*s), new Point(x + 42*s, y + 16*s));
+    tail.move(new Point(x + 35*s, y + 14*s));
+    tail.addCurve(new Point(x + 40*s, y + 5*s), new Point(x + 36*s, y + 10*s), new Point(x + 42*s, y + 6*s));
+    tail.addCurve(new Point(x + 35*s, y + 16*s), new Point(x + 39*s, y + 7*s), new Point(x + 36*s, y + 12*s));
   } else {
-    tail.move(new Point(x + 42*s, y + 28*s));
-    tail.addCurve(new Point(x + 46*s, y + 38*s), new Point(x + 44*s, y + 32*s), new Point(x + 48*s, y + 36*s));
-    tail.addLine(new Point(x + 44*s, y + 38*s));
-    tail.addCurve(new Point(x + 42*s, y + 30*s), new Point(x + 46*s, y + 36*s), new Point(x + 42*s, y + 32*s));
+    tail.move(new Point(x + 35*s, y + 20*s));
+    tail.addCurve(new Point(x + 38*s, y + 28*s), new Point(x + 36*s, y + 24*s), new Point(x + 40*s, y + 27*s));
+    tail.addCurve(new Point(x + 35*s, y + 22*s), new Point(x + 37*s, y + 28*s), new Point(x + 36*s, y + 24*s));
   }
   tail.closeSubpath();
-  ctx.addPath(tail);
-  ctx.fillPath();
+  ctx.addPath(tail); ctx.fillPath();
 }
 
 function drawSparkline(ctx, data, x, y, w, h, color) {
   if (!data || data.length < 2) return;
   const max = Math.max(...data.map(d => d.total), 1);
   const step = w / (data.length - 1);
-  // Fill area
   const area = new Path();
   area.move(new Point(x, y + h));
   for (let i = 0; i < data.length; i++) {
-    const px = x + i * step;
-    const py = y + h - (data[i].total / max) * h;
-    area.addLine(new Point(px, py));
+    area.addLine(new Point(x + i * step, y + h - (data[i].total / max) * h));
   }
   area.addLine(new Point(x + w, y + h));
   area.closeSubpath();
   ctx.setFillColor(new Color(color, 0.15));
-  ctx.addPath(area);
-  ctx.fillPath();
-  // Stroke line
+  ctx.addPath(area); ctx.fillPath();
   ctx.setStrokeColor(new Color(color));
   ctx.setLineWidth(1.5);
   const line = new Path();
@@ -535,9 +545,7 @@ function drawSparkline(ctx, data, x, y, w, h, color) {
     if (i === 0) line.move(new Point(px, py));
     else line.addLine(new Point(px, py));
   }
-  ctx.addPath(line);
-  ctx.strokePath();
-  // Dot on latest point
+  ctx.addPath(line); ctx.strokePath();
   const lastX = x + (data.length - 1) * step;
   const lastY = y + h - (data[data.length - 1].total / max) * h;
   ctx.setFillColor(new Color(color));
@@ -552,116 +560,134 @@ try {
   ctx.opaque = false;
   ctx.respectScreenScale = true;
 
-  // Background gradient
+  // Background
   ctx.setFillColor(new Color("#0f1117"));
   ctx.fillRect(new Rect(0, 0, W, H));
-  // Subtle gradient overlay
-  ctx.setFillColor(new Color("#161927", 0.6));
-  ctx.fillRect(new Rect(0, 0, W, H * 0.5));
 
-  // Draw corgi in top-right
-  drawCorgi(ctx, W - 68, 6, 58, d.under_budget);
+  // ── TOP ROW: Title + Corgi + Pace ──
+  // Corgi (small, next to title)
+  drawCorgi(ctx, 10, 2, 1.1, d.under_budget);
 
   // Title
-  ctx.setFont(Font.boldSystemFont(14));
+  ctx.setFont(Font.boldSystemFont(13));
   ctx.setTextColor(new Color("#e8eaf0"));
-  ctx.drawTextInRect("Budget Corgi", new Rect(12, 8, 200, 20));
+  ctx.drawTextInRect("Adam + Aruto", new Rect(56, 6, 140, 18));
+  ctx.setFont(Font.systemFont(10));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect("Budget", new Rect(56, 22, 60, 14));
 
-  // Pace badge
+  // Pace badge (top-right)
   const paceColor = d.under_budget ? "#00cec9" : "#ff6b6b";
-  ctx.setFillColor(new Color(paceColor, 0.18));
-  const paceText = d.pace_percent + "% pace";
-  ctx.fillRect(new Rect(12, 28, 72, 18));
-  ctx.setFont(Font.boldSystemFont(10));
-  ctx.setTextColor(new Color(paceColor));
-  ctx.drawTextInRect(paceText, new Rect(16, 30, 65, 16));
-
-  // Week-vs-week comparison
-  const weekChangeSign = d.week_change >= 0 ? "+" : "";
-  const weekColor = d.week_change <= 0 ? "#00cec9" : "#ff6b6b";
-  const weekArrow = d.week_change <= 0 ? "\\u2193" : "\\u2191";
-
-  ctx.setFont(Font.systemFont(9));
-  ctx.setTextColor(new Color("#8b8fa3"));
-  ctx.drawTextInRect("This week", new Rect(12, 52, 60, 14));
-  ctx.drawTextInRect("Last week", new Rect(12, 78, 60, 14));
-  ctx.drawTextInRect("vs", new Rect(12, 98, 20, 14));
-
-  ctx.setFont(Font.boldSystemFont(16));
-  ctx.setTextColor(new Color("#e8eaf0"));
-  ctx.drawTextInRect(fmt(d.this_week_spent), new Rect(70, 49, 100, 20));
-
-  ctx.setFont(Font.systemFont(13));
-  ctx.setTextColor(new Color("#8b8fa3"));
-  ctx.drawTextInRect(fmt(d.last_week_spent), new Rect(70, 76, 100, 18));
-
+  ctx.setFillColor(new Color(paceColor, 0.2));
+  const pctW = 60;
+  ctx.fillRect(new Rect(W - pctW - 12, 6, pctW, 20));
   ctx.setFont(Font.boldSystemFont(12));
-  ctx.setTextColor(new Color(weekColor));
-  ctx.drawTextInRect(weekArrow + " " + weekChangeSign + d.week_change + "%", new Rect(32, 96, 80, 16));
+  ctx.setTextColor(new Color(paceColor));
+  ctx.drawTextInRect(d.pace_percent + "%", new Rect(W - pctW - 8, 9, pctW - 4, 16));
 
-  // Sparkline (last 7 days)
-  const sparkColor = d.under_budget ? "#00cec9" : "#ff6b6b";
-  drawSparkline(ctx, d.daily_breakdown, 140, 50, 120, 44, sparkColor);
+  // ── USER COMPARISON ROW (prominent) ──
+  const userY = 40;
+  const userW = (W - 36) / 2;
+  for (let i = 0; i < Math.min(d.users.length, 2); i++) {
+    const u = d.users[i];
+    const ux = 12 + i * (userW + 12);
+    const nameColor = u.name.toLowerCase().includes("adam") ? "#6c5ce7" : "#00cec9";
+    const ago = timeAgo(u.last_added_at, u.days_since_last);
+    const agoColor = u.days_since_last !== null && u.days_since_last <= 1 ? "#00cec9" : "#ff6b6b";
 
-  // Day labels under sparkline
-  ctx.setFont(Font.systemFont(6));
-  ctx.setTextColor(new Color("#8b8fa3"));
-  if (d.daily_breakdown && d.daily_breakdown.length >= 7) {
-    const step = 120 / 6;
-    for (let i = 0; i < 7; i++) {
-      ctx.drawTextInRect(d.daily_breakdown[i].date, new Rect(140 + i * step - 8, 96, 20, 10));
-    }
+    // User card background
+    ctx.setFillColor(new Color("#1a1d27"));
+    ctx.fillRect(new Rect(ux, userY, userW, 36));
+
+    // Color accent bar
+    ctx.setFillColor(new Color(nameColor));
+    ctx.fillRect(new Rect(ux, userY, 3, 36));
+
+    // Name
+    ctx.setFont(Font.boldSystemFont(11));
+    ctx.setTextColor(new Color("#e8eaf0"));
+    ctx.drawTextInRect(u.name.split(" ")[0], new Rect(ux + 8, userY + 3, 60, 15));
+
+    // Amount
+    ctx.setFont(Font.boldSystemFont(13));
+    ctx.setTextColor(new Color(nameColor));
+    ctx.drawTextInRect(fmt(u.month_total), new Rect(ux + 8, userY + 18, userW - 16, 16));
+
+    // Last added (right side of card)
+    ctx.setFont(Font.systemFont(8));
+    ctx.setTextColor(new Color(agoColor));
+    ctx.drawTextInRect(ago, new Rect(ux + userW - 52, userY + 5, 48, 12));
+
+    // Txn count
+    ctx.setFont(Font.systemFont(8));
+    ctx.setTextColor(new Color("#8b8fa3"));
+    ctx.drawTextInRect(u.month_count + " txns", new Rect(ux + userW - 52, userY + 18, 48, 12));
   }
 
-  // Bottom row: Monthly stats
+  // ── MIDDLE: Week comparison + Sparkline ──
+  const midY = 82;
+
+  // This week
+  ctx.setFont(Font.systemFont(8));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect("This wk", new Rect(12, midY, 40, 12));
+  ctx.setFont(Font.boldSystemFont(13));
+  ctx.setTextColor(new Color("#e8eaf0"));
+  ctx.drawTextInRect(fmt(d.this_week_spent), new Rect(52, midY - 1, 70, 16));
+
+  // Last week
+  ctx.setFont(Font.systemFont(8));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect("Last wk", new Rect(12, midY + 16, 40, 12));
+  ctx.setFont(Font.systemFont(11));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect(fmt(d.last_week_spent), new Rect(52, midY + 15, 70, 14));
+
+  // Week change arrow
+  const weekColor = d.week_change <= 0 ? "#00cec9" : "#ff6b6b";
+  const weekSign = d.week_change >= 0 ? "+" : "";
+  const weekArrow = d.week_change <= 0 ? "\\u2193" : "\\u2191";
+  ctx.setFont(Font.boldSystemFont(10));
+  ctx.setTextColor(new Color(weekColor));
+  ctx.drawTextInRect(weekArrow + weekSign + d.week_change + "%", new Rect(122, midY + 5, 50, 14));
+
+  // Sparkline (right side)
+  const sparkColor = d.under_budget ? "#00cec9" : "#ff6b6b";
+  drawSparkline(ctx, d.daily_breakdown, 178, midY, W - 190, 28, sparkColor);
+
+  // ── BOTTOM: Progress bar + stats ──
   const bottomY = 115;
   ctx.setFillColor(new Color("#1a1d27"));
-  ctx.fillRect(new Rect(0, bottomY - 4, W, H - bottomY + 4));
+  ctx.fillRect(new Rect(0, bottomY - 2, W, H - bottomY + 2));
 
   // Progress bar
-  const barY = bottomY + 2;
   const barW = W - 24;
   ctx.setFillColor(new Color("#2d3148"));
-  ctx.fillRect(new Rect(12, barY, barW, 5));
+  ctx.fillRect(new Rect(12, bottomY + 1, barW, 4));
   const fillPct = Math.min(d.pace_percent, 100) / 100;
   const barColor = d.pace_percent <= 90 ? "#00cec9" : d.pace_percent <= 100 ? "#feca57" : "#ff6b6b";
   ctx.setFillColor(new Color(barColor));
-  ctx.fillRect(new Rect(12, barY, barW * fillPct, 5));
+  ctx.fillRect(new Rect(12, bottomY + 1, barW * fillPct, 4));
 
-  // Monthly totals row
-  const statY = barY + 12;
-  const statCols = [
+  // Stats row
+  const statY = bottomY + 10;
+  const stats = [
     { label: "Today", value: fmt(d.today_spent), color: "#e8eaf0" },
     { label: "Month", value: fmt(d.month_spent), color: "#6c5ce7" },
     { label: "Budget", value: fmt(d.monthly_budget), color: "#00cec9" },
     { label: "Projected", value: fmt(d.projected_monthly), color: d.under_budget ? "#00cec9" : "#ff6b6b" },
   ];
-  const colW = (W - 24) / statCols.length;
-  for (let i = 0; i < statCols.length; i++) {
+  const colW = (W - 24) / stats.length;
+  for (let i = 0; i < stats.length; i++) {
     const cx = 12 + i * colW;
     ctx.setFont(Font.systemFont(7));
     ctx.setTextColor(new Color("#8b8fa3"));
-    ctx.drawTextInRect(statCols[i].label, new Rect(cx, statY, colW, 10));
+    ctx.drawTextInRect(stats[i].label, new Rect(cx, statY, colW, 10));
     ctx.setFont(Font.boldSystemFont(10));
-    ctx.setTextColor(new Color(statCols[i].color));
-    ctx.drawTextInRect(statCols[i].value, new Rect(cx, statY + 10, colW, 14));
+    ctx.setTextColor(new Color(stats[i].color));
+    ctx.drawTextInRect(stats[i].value, new Rect(cx, statY + 10, colW, 14));
   }
 
-  // Per-user dots (top-right, below corgi)
-  let userY = 54;
-  ctx.setFont(Font.systemFont(8));
-  for (const u of d.users) {
-    const nameColor = u.name.toLowerCase().includes("adam") ? "#6c5ce7" : "#00cec9";
-    ctx.setFillColor(new Color(nameColor));
-    ctx.fillEllipse(new Rect(W - 66, userY + 2, 5, 5));
-    ctx.setTextColor(new Color("#e8eaf0"));
-    ctx.drawTextInRect(u.name.split(" ")[0], new Rect(W - 58, userY, 30, 12));
-    ctx.setTextColor(new Color("#8b8fa3"));
-    ctx.drawTextInRect(fmt(u.month_total), new Rect(W - 30, userY, 28, 12));
-    userY += 14;
-  }
-
-  // Build widget
   const w = new ListWidget();
   w.backgroundColor = new Color("#0f1117");
   w.backgroundImage = ctx.getImage();
