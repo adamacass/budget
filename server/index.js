@@ -911,7 +911,7 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   for (let d = 13; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
-    dailySpending.push({ date: date.substring(5), total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
+    dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
   }
 
   // Top 5 biggest expenses this month

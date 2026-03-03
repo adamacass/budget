@@ -46,7 +46,25 @@ export default function Dashboard() {
       .finally(() => setLoading(false));
   }
 
+  function refreshData() {
+    Promise.all([getDashboard(), getInsights()])
+      .then(([d, i]) => { setData(d); setInsights(i); })
+      .catch(console.error);
+    if (spendingRange !== 14) {
+      getDailySpending(spendingRange)
+        .then(r => setSpendingData(r.daily_spending))
+        .catch(console.error);
+    }
+  }
+
   useEffect(() => { loadAll(); }, []);
+
+  // Refresh data when tab becomes visible (e.g. navigating back from Expenses)
+  useEffect(() => {
+    function onFocus() { if (data) refreshData(); }
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  });
 
   useEffect(() => {
     if (spendingRange === 14) {
@@ -72,8 +90,7 @@ export default function Dashboard() {
       setAddedMsg(`${category} ${fmtMoney2(parseFloat(amount))}`);
       setAmount(''); setDescription('');
       setTimeout(() => setAddedMsg(''), 3000);
-      Promise.all([getDashboard(), getInsights()])
-        .then(([d, i]) => { setData(d); setInsights(i); });
+      refreshData();
       amountRef.current?.focus();
     } catch (err) { alert(err.message); }
     setAdding(false);
@@ -128,8 +145,7 @@ export default function Dashboard() {
       const result = await importScreenshot(extracted.transactions);
       setImportResult(result);
       setExtracted(null);
-      Promise.all([getDashboard(), getInsights()])
-        .then(([d, i]) => { setData(d); setInsights(i); });
+      refreshData();
       setTimeout(() => setImportResult(null), 5000);
     } catch (err) { alert('Import error: ' + err.message); }
     setImporting(false);
@@ -544,13 +560,25 @@ export default function Dashboard() {
           <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}><div className="spinner" /></div>
         ) : (
           <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={spendingData || insights?.daily_spending || []}>
+            <AreaChart data={spendingData || insights?.daily_spending || []}
+              onClick={(e) => {
+                if (e?.activePayload?.[0]?.payload?.full_date) {
+                  const d = e.activePayload[0].payload.full_date;
+                  navigate(`/expenses?start=${d}&end=${d}`);
+                }
+              }}
+              style={{ cursor: 'pointer' }}>
               <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }}
                 interval={spendingRange > 60 ? Math.floor(spendingRange / 15) : spendingRange > 30 ? 2 : 0} />
               <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
               <Tooltip contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
                 formatter={(v) => [fmtMoney(v), 'Spent']} />
-              <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2} />
+              {dailyBudget > 0 && (
+                <ReferenceLine y={dailyBudget} stroke="#00cec9" strokeDasharray="4 3" strokeWidth={1.5}
+                  label={{ value: `Budget ${fmtMoney(dailyBudget)}/day`, fill: '#00cec9', fontSize: 10, position: 'right' }} />
+              )}
+              <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2}
+                activeDot={{ r: 5, stroke: '#6c5ce7', strokeWidth: 2, fill: '#1a1d27' }} />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -565,7 +593,12 @@ export default function Dashboard() {
               <Pie data={data.expenses_by_category} dataKey="total" nameKey="category"
                 cx="50%" cy="50%" outerRadius={90} innerRadius={40}
                 label={({ category, total, percent }) => `${category} $${total.toFixed(0)} (${(percent * 100).toFixed(0)}%)`}
-                labelLine={{ stroke: '#8b8fa3', strokeWidth: 0.5 }}>
+                labelLine={{ stroke: '#8b8fa3', strokeWidth: 0.5 }}
+                onClick={(_, index) => {
+                  const cat = data.expenses_by_category[index]?.category;
+                  if (cat) navigate(`/expenses?category=${encodeURIComponent(cat)}`);
+                }}
+                style={{ cursor: 'pointer' }}>
                 {data.expenses_by_category.map((entry, i) => <Cell key={i} fill={getCategoryColor(entry.category)} />)}
               </Pie>
               <Tooltip formatter={(v) => '$' + v.toFixed(0)} />
