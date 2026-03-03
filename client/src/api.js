@@ -93,6 +93,7 @@ export const importScreenshot = (transactions) => apiFetch('/api/screenshots/imp
 // Statement Import
 export const parseStatement = (csv_text) => apiFetch('/api/statements/parse', { method: 'POST', body: JSON.stringify({ csv_text }) });
 export const importStatement = (transactions) => apiFetch('/api/statements/import', { method: 'POST', body: JSON.stringify({ transactions }) });
+export const checkDuplicates = (transactions) => apiFetch('/api/expenses/check-duplicates', { method: 'POST', body: JSON.stringify({ transactions }) });
 
 // Projections
 export const getProjections = () => apiFetch('/api/projections');

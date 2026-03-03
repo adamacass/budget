@@ -4,13 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera, Upload, X, Edit3 } from 'lucide-react';
-
-const COLORS = ['#6c5ce7', '#00cec9', '#ff6b6b', '#feca57', '#54a0ff', '#a29bfe', '#fd79a8', '#55efc4', '#fab1a0', '#74b9ff'];
-const CATEGORIES = [
-  'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
-  'Entertainment', 'Health', 'Clothing', 'Personal Care', 'Subscriptions',
-  'Pets', 'Gifts', 'Education', 'Home', 'Mortgage', 'Other'
-];
+import { CATEGORIES, getCategoryColor, getUserColor, getUserClass } from '../categoryColors';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
 function fmtMoney2(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -151,8 +145,38 @@ export default function Dashboard() {
   const lastWeek = data.weekly_trend?.[data.weekly_trend.length - 2]?.total || 0;
   const weekChange = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : 0;
 
+  // Corgi budget check
+  const dailyBudget = pace?.monthly_budget ? pace.monthly_budget / 30 : 0;
+  const weeklyBudget = data.weekly_budget || 0;
+  const isUnderBudget = pacePercent > 0 && pacePercent <= 100;
+  const isOverBudget = pacePercent > 100;
+
   return (
     <div>
+      {/* ===== CORGI MASCOT ===== */}
+      {pace && (isUnderBudget || isOverBudget) && (
+        <div className={`corgi-mascot ${isUnderBudget ? 'happy' : 'sad'}`}>
+          <div className="corgi-icon">
+            {isUnderBudget ? '\uD83D\uDC36' : '\uD83D\uDE1E\uD83D\uDC36'}
+          </div>
+          <div className="corgi-msg">
+            {isUnderBudget ? (
+              <>
+                <strong>Woof! Great job!</strong> You're <strong>{100 - pacePercent}% under budget</strong> this month!
+                {weekChange < 0 && ` Spending dropped ${Math.abs(weekChange)}% vs last week too.`}
+                {' '}Keep it up!
+              </>
+            ) : (
+              <>
+                <strong>Ruff...</strong> You're <strong>{pacePercent - 100}% over budget</strong> this month.
+                {pace.daily_average > dailyBudget && ` Daily spend (${fmtMoney(pace.daily_average)}) exceeds target (${fmtMoney(dailyBudget)}).`}
+                {' '}Let's rein it in!
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ===== ARUTO TRANSACTION BANNER ===== */}
       {user?.username === 'aruto' && !dismissedBanner && (
         <div className="aruto-banner">
@@ -232,8 +256,9 @@ export default function Dashboard() {
           <div className="quick-add-recent">
             {insights.recent_expenses.slice(0, 4).map((e, i) => (
               <span key={i} className="recent-pill">
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: getCategoryColor(e.category), display: 'inline-block' }} />
                 {e.category} <strong>{fmtMoney2(e.amount)}</strong>
-                <span className="recent-who">{e.user_name}</span>
+                <span className="recent-who" style={{ color: getUserColor(e.user_name) }}>{e.user_name}</span>
               </span>
             ))}
           </div>
@@ -310,7 +335,7 @@ export default function Dashboard() {
             return (
               <div key={u.user_id} className="pulse-user clickable"
                 onClick={() => navigate(`/expenses?user_id=${u.user_id}`)}>
-                <div className="pulse-avatar">{u.display_name[0]}</div>
+                <div className="pulse-avatar" style={{ background: getUserColor(u.display_name) }}>{u.display_name[0]}</div>
                 <div className="pulse-info">
                   <div className="pulse-name">
                     {u.display_name}
@@ -449,7 +474,7 @@ export default function Dashboard() {
                 <Pie data={data.expenses_by_category} dataKey="total" nameKey="category"
                   cx="50%" cy="50%" outerRadius={60}
                   label={({ category, total }) => `${category}: $${total.toFixed(0)}`}>
-                  {data.expenses_by_category.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                  {data.expenses_by_category.map((entry, i) => <Cell key={i} fill={getCategoryColor(entry.category)} />)}
                 </Pie>
                 <Tooltip formatter={(v) => '$' + v.toFixed(0)} />
               </PieChart>
@@ -469,7 +494,10 @@ export default function Dashboard() {
                 <div key={b.category} className="budget-bar-row clickable"
                   onClick={() => navigate(`/expenses?category=${encodeURIComponent(b.category)}`)}>
                   <div className="budget-bar-label">
-                    <span>{b.category}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: getCategoryColor(b.category), display: 'inline-block' }} />
+                      {b.category}
+                    </span>
                     <span>
                       <strong style={{ color: b.actual > b.budget ? 'var(--red)' : 'var(--text)' }}>{fmtMoney(b.actual)}</strong>
                       <span style={{ color: 'var(--text-muted)' }}> / {fmtMoney(b.budget)}</span>

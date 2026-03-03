@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard, PiggyBank } from 'lucide-react';
+import { useTheme } from '../context/ThemeContext';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard, PiggyBank, Sun, Moon } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
@@ -29,6 +30,7 @@ function formatDateTime(iso) {
 export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const { theme, toggleTheme } = useTheme();
   const [versionInfo, setVersionInfo] = useState({ version: appVersion, buildTime });
 
   useEffect(() => {
@@ -74,6 +76,12 @@ export default function Layout() {
         </div>
 
         <div className="sidebar-footer">
+          <div className="theme-toggle">
+            <button className="theme-toggle-btn" onClick={toggleTheme}>
+              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+              {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+            </button>
+          </div>
           {versionInfo.version && (
             <div className="sidebar-version">
               <span>v{versionInfo.version}</span>

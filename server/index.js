@@ -171,9 +171,9 @@ app.delete('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) =>
   res.json({ message: 'Deleted' });
 }));
 
-// Update expense (for speed-run categorisation etc.)
+// Update expense (full inline editing — category, description, amount, date, subcategory, recurring)
 app.put('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
-  const { category, description, amount } = req.body;
+  const { category, description, amount, expense_date, subcategory, recurring } = req.body;
   const db = await getDb();
   const updates = [];
   const params = [];
@@ -181,11 +181,47 @@ app.put('/api/expenses/:id', authMiddleware, asyncHandler(async (req, res) => {
   if (category) { updates.push(`category = $${paramIdx++}`); params.push(category); }
   if (description !== undefined) { updates.push(`description = $${paramIdx++}`); params.push(description); }
   if (amount !== undefined) { updates.push(`amount = $${paramIdx++}`); params.push(amount); }
+  if (expense_date !== undefined) { updates.push(`expense_date = $${paramIdx++}`); params.push(expense_date); }
+  if (subcategory !== undefined) { updates.push(`subcategory = $${paramIdx++}`); params.push(subcategory); }
+  if (recurring !== undefined) { updates.push(`recurring = $${paramIdx++}`); params.push(recurring ? 1 : 0); }
   if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
   params.push(req.params.id);
   await db.query(`UPDATE expenses SET ${updates.join(', ')} WHERE id = $${paramIdx}`, params);
   const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [req.params.id])).rows[0];
   res.json(expense);
+}));
+
+// Check for potential duplicates before importing
+app.post('/api/expenses/check-duplicates', authMiddleware, asyncHandler(async (req, res) => {
+  const { transactions } = req.body;
+  if (!transactions || !transactions.length) return res.json({ duplicates: [] });
+  const db = await getDb();
+  const results = [];
+  for (const t of transactions) {
+    // Exact match: same date, amount, description
+    const exact = (await db.query(
+      'SELECT e.id, e.description, e.amount, e.expense_date, e.category, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date = $1 AND e.amount = $2',
+      [t.expense_date, t.amount]
+    )).rows;
+    // Near match: same date, similar amount (within $1)
+    const near = exact.length === 0 ? (await db.query(
+      'SELECT e.id, e.description, e.amount, e.expense_date, e.category, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.expense_date = $1 AND ABS(e.amount - $2) <= 1 AND ABS(e.amount - $2) > 0',
+      [t.expense_date, t.amount]
+    )).rows : [];
+    // Previously deleted
+    const deleted = (await db.query(
+      'SELECT id FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3',
+      [t.description, t.amount, t.expense_date]
+    )).rows;
+    results.push({
+      transaction: t,
+      exact_matches: exact,
+      near_matches: near,
+      was_deleted: deleted.length > 0,
+      is_duplicate: exact.length > 0 || deleted.length > 0
+    });
+  }
+  res.json({ results });
 }));
 
 // Expense summary by period (week/month/year) with per-user breakdown
@@ -511,6 +547,7 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
   }
 
   const transactions = [];
+  const income_transactions = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -521,20 +558,39 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
 
     // Parse amount — handle debit/credit columns or single amount
     let amount = 0;
+    let isCredit = false;
     if (debitCol >= 0 && creditCol >= 0) {
       const debit = parseFloat((cols[debitCol] || '').replace(/[$,]/g, '')) || 0;
       const credit = parseFloat((cols[creditCol] || '').replace(/[$,]/g, '')) || 0;
-      amount = debit > 0 ? debit : -credit;
+      if (debit > 0) { amount = debit; }
+      else if (credit > 0) { amount = credit; isCredit = true; }
     } else {
-      amount = parseFloat((cols[amountCol] || '').replace(/[$,]/g, '')) || 0;
+      const raw = parseFloat((cols[amountCol] || '').replace(/[$,]/g, '')) || 0;
+      if (raw < 0) { amount = Math.abs(raw); isCredit = true; }
+      else { amount = raw; }
     }
 
-    // Skip zero-amount rows, payments (credits), and header-like rows
+    // Skip zero-amount rows
     if (amount <= 0) continue;
 
     // Parse date — try common formats
     const parsedDate = parseStatementDate(rawDate);
     if (!parsedDate) continue;
+
+    // Detect income/salary patterns
+    const dl = description.toLowerCase();
+    const isIncome = isCredit || /salary|payroll|wages|pay\s|direct credit|employer|ato\s|tax refund|centrelink|superannuation|dividend|interest\s+(credit|earned)|refund/i.test(dl);
+
+    if (isIncome) {
+      income_transactions.push({
+        expense_date: parsedDate,
+        description: description,
+        amount: Math.round(amount * 100) / 100,
+        type: 'income',
+        source: 'statement'
+      });
+      continue;
+    }
 
     // Auto-categorize based on description
     const category = autoCategorizeTxn(description);
@@ -549,7 +605,7 @@ app.post('/api/statements/parse', authMiddleware, (req, res) => {
     });
   }
 
-  res.json({ transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
+  res.json({ transactions, income_transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
 });
 
 app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res) => {

@@ -1,13 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { getExpenses, getExpenseSummary, addExpense, addExpensesBatch, deleteExpense, updateExpense } from '../api';
-import { Plus, Trash2, Filter, Zap, Users, X, Check, ChevronDown, ChevronUp, ArrowLeft } from 'lucide-react';
-
-const CATEGORIES = [
-  'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
-  'Entertainment', 'Health', 'Clothing', 'Personal Care', 'Subscriptions',
-  'Pets', 'Gifts', 'Education', 'Home', 'Mortgage', 'Other'
-];
+import { Plus, Trash2, Filter, Zap, Users, X, Check, ChevronDown, ChevronUp, ArrowLeft, Edit3, Save, Tag } from 'lucide-react';
+import { CATEGORIES, getCategoryColor, getUserColor, getUserClass } from '../categoryColors';
 
 const SYDNEY_RANGES = {
   Groceries: [200, 300], 'Dining Out': [50, 125], Transport: [50, 100],
@@ -43,6 +38,16 @@ export default function Expenses() {
   const [uncategorized, setUncategorized] = useState([]);
   const [speedRunIndex, setSpeedRunIndex] = useState(0);
   const [speedRunSaving, setSpeedRunSaving] = useState(false);
+
+  // Inline editing state
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+
+  // Categorisation mode
+  const [catMode, setCatMode] = useState(false);
+  const [catModeItems, setCatModeItems] = useState([]);
+  const [catModeIndex, setCatModeIndex] = useState(0);
+  const [catModeSaving, setCatModeSaving] = useState(false);
 
   // Individual entry form
   const [form, setForm] = useState({
@@ -86,24 +91,14 @@ export default function Expenses() {
     setSearchParams(newParams);
   }
 
-  function clearAllFilters() {
-    setSearchParams({});
-  }
+  function clearAllFilters() { setSearchParams({}); }
 
   function filterByCategory(category) {
-    if (activeCategory === category) {
-      setFilter('category', '');
-    } else {
-      setFilter('category', category);
-    }
+    setFilter('category', activeCategory === category ? '' : category);
   }
 
   function filterByUser(userId) {
-    if (activeUserId === String(userId)) {
-      setFilter('user_id', '');
-    } else {
-      setFilter('user_id', String(userId));
-    }
+    setFilter('user_id', activeUserId === String(userId) ? '' : String(userId));
   }
 
   async function handleAddSingle(e) {
@@ -136,9 +131,7 @@ export default function Expenses() {
     if (entries.length === 0) return alert('Enter at least one amount or use ranges');
     try {
       await addExpensesBatch(entries);
-      loadExpenses();
-      loadSummary();
-      setShowAdd(false);
+      loadExpenses(); loadSummary(); setShowAdd(false);
     } catch (err) { alert(err.message); }
   }
 
@@ -149,7 +142,38 @@ export default function Expenses() {
     loadSummary();
   }
 
-  // Speed run
+  // ===== INLINE EDITING =====
+  function startEdit(expense) {
+    setEditingId(expense.id);
+    setEditForm({
+      category: expense.category,
+      description: expense.description || '',
+      amount: expense.amount,
+      expense_date: expense.expense_date,
+      subcategory: expense.subcategory || '',
+      recurring: !!expense.recurring,
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditForm({});
+  }
+
+  async function saveEdit() {
+    try {
+      const updated = await updateExpense(editingId, {
+        ...editForm,
+        amount: parseFloat(editForm.amount),
+      });
+      setExpenses(prev => prev.map(e => e.id === editingId ? { ...e, ...updated } : e));
+      setEditingId(null);
+      setEditForm({});
+      loadSummary();
+    } catch (err) { alert(err.message); }
+  }
+
+  // ===== SPEED RUN =====
   async function startSpeedRun() {
     try {
       const data = await getExpenses({ category: 'Other' });
@@ -173,12 +197,52 @@ export default function Expenses() {
     setSpeedRunIndex(i => Math.min(i + 1, uncategorized.length));
   }
 
+  // ===== CATEGORISATION MODE =====
+  async function startCatMode() {
+    try {
+      const data = await getExpenses({ category: 'Other' });
+      if (data.length === 0) { alert('No "Other" transactions to categorise!'); return; }
+      setCatModeItems(data);
+      setCatModeIndex(0);
+      setCatMode(true);
+    } catch (err) { alert(err.message); }
+  }
+
+  async function catModeAssign(category) {
+    const item = catModeItems[catModeIndex];
+    if (!item) return;
+    setCatModeSaving(true);
+    try {
+      await updateExpense(item.id, { category });
+      setCatModeItems(prev => prev.filter(e => e.id !== item.id));
+      // index stays same because the array shrinks
+    } catch (err) { alert(err.message); }
+    setCatModeSaving(false);
+  }
+
+  async function catModeMarkIncome() {
+    const item = catModeItems[catModeIndex];
+    if (!item) return;
+    setCatModeSaving(true);
+    try {
+      // Delete the expense and add as income
+      await deleteExpense(item.id);
+      setCatModeItems(prev => prev.filter(e => e.id !== item.id));
+    } catch (err) { alert(err.message); }
+    setCatModeSaving(false);
+  }
+
+  function catModeSkip() {
+    setCatModeIndex(i => Math.min(i + 1, catModeItems.length - 1));
+  }
+
   const currentPeriod = summary?.[period];
   const maxUserTotal = currentPeriod ? Math.max(...(currentPeriod.by_user?.map(u => u.total) || [1]), 1) : 1;
   const total = expenses.reduce((s, e) => s + e.amount, 0);
 
   // Speed run current expense
   const speedRunCurrent = uncategorized[speedRunIndex];
+  const catModeCurrent = catModeItems[catModeIndex];
 
   return (
     <div>
@@ -216,6 +280,7 @@ export default function Expenses() {
                       className="speed-run-cat-btn"
                       disabled={speedRunSaving}
                       onClick={() => categorizeExpense(speedRunCurrent.id, c)}
+                      style={{ borderLeftColor: getCategoryColor(c), borderLeftWidth: 3 }}
                     >
                       {c}
                     </button>
@@ -236,6 +301,73 @@ export default function Expenses() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ===== CATEGORISATION MODE ===== */}
+      {catMode && (
+        <div className="cat-mode-card">
+          <div className="cat-mode-header">
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1rem' }}>
+              <Tag size={16} style={{ color: 'var(--yellow)' }} /> Categorisation Mode
+            </h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <span className="cat-mode-counter">{catModeItems.length} remaining</span>
+              <button className="btn btn-ghost btn-sm" onClick={() => { setCatMode(false); loadExpenses(); loadSummary(); }}>
+                <X size={14} /> Exit
+              </button>
+            </div>
+          </div>
+
+          {catModeItems.length > 0 && catModeIndex < catModeItems.length ? (
+            <>
+              <div className="progress-bar" style={{ height: 4, marginBottom: '1rem' }}>
+                <div className="progress-fill green" style={{ width: `${catModeItems.length > 0 ? ((catModeItems.length - catModeItems.length) / 1 || 5) : 0}%` }} />
+              </div>
+
+              <div className="cat-mode-expense">
+                <div className="speed-run-date">{catModeCurrent.expense_date}</div>
+                <div className="speed-run-desc">{catModeCurrent.description || 'No description'}</div>
+                <div className="speed-run-amount">{fmtMoney(catModeCurrent.amount)}</div>
+                <div className="speed-run-user" style={{ color: getUserColor(catModeCurrent.user_name) }}>
+                  {catModeCurrent.user_name}
+                </div>
+              </div>
+
+              <div className="cat-mode-grid">
+                {CATEGORIES.filter(c => c !== 'Other').map(c => (
+                  <button
+                    key={c}
+                    className="cat-mode-btn"
+                    disabled={catModeSaving}
+                    onClick={() => catModeAssign(c)}
+                    style={{ borderLeft: `3px solid ${getCategoryColor(c)}` }}
+                  >
+                    {c}
+                  </button>
+                ))}
+                <button
+                  className="cat-mode-btn income-btn"
+                  disabled={catModeSaving}
+                  onClick={catModeMarkIncome}
+                  title="This is income, not an expense — remove it"
+                >
+                  Income (remove)
+                </button>
+              </div>
+
+              <div className="cat-mode-nav">
+                <button className="btn btn-ghost btn-sm" disabled={catModeIndex === 0} onClick={() => setCatModeIndex(i => i - 1)}>Prev</button>
+                <button className="btn btn-ghost btn-sm" onClick={catModeSkip}>Skip</button>
+              </div>
+            </>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '2rem' }}>
+              <Check size={36} style={{ color: 'var(--green)', marginBottom: '0.5rem' }} />
+              <div style={{ fontWeight: 600 }}>All categorised!</div>
+              <button className="btn btn-primary" style={{ marginTop: '1rem' }} onClick={() => { setCatMode(false); loadExpenses(); loadSummary(); }}>Done</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -268,16 +400,21 @@ export default function Expenses() {
         </div>
       )}
 
-      {/* Period Toggle + Speed Run */}
+      {/* Period Toggle + Speed Run + Cat Mode */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
         <div className="period-toggle">
           <button className={period === 'week' ? 'active' : ''} onClick={() => setPeriod('week')}>Week</button>
           <button className={period === 'month' ? 'active' : ''} onClick={() => setPeriod('month')}>Month</button>
           <button className={period === 'year' ? 'active' : ''} onClick={() => setPeriod('year')}>Year</button>
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={startSpeedRun}>
-          <Zap size={14} /> Speed Run
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button className="btn btn-ghost btn-sm" onClick={startCatMode}>
+            <Tag size={14} /> Categorise
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={startSpeedRun}>
+            <Zap size={14} /> Speed Run
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -310,9 +447,9 @@ export default function Expenses() {
           <div className="card-title">
             <Users size={14} /> Adam vs Aruto — {period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : 'This Year'}
           </div>
-          {currentPeriod.by_user.map((u, i) => (
+          {currentPeriod.by_user.map((u) => (
             <div key={u.user_id} className="vs-row clickable" onClick={() => filterByUser(u.user_id)}>
-              <div className="vs-avatar" style={{ background: i === 0 ? 'var(--accent)' : 'var(--green)' }}>
+              <div className="vs-avatar" style={{ background: getUserColor(u.display_name) }}>
                 {u.display_name[0]}
               </div>
               <div className="vs-name">{u.display_name}</div>
@@ -321,7 +458,7 @@ export default function Expenses() {
                   className="vs-bar"
                   style={{
                     width: `${maxUserTotal > 0 ? (u.total / maxUserTotal) * 100 : 0}%`,
-                    background: i === 0 ? 'var(--accent)' : 'var(--green)'
+                    background: getUserColor(u.display_name)
                   }}
                 />
               </div>
@@ -355,14 +492,17 @@ export default function Expenses() {
                 <div key={c.category} className={`budget-bar-row clickable ${isActive ? 'selected' : ''}`}
                   onClick={() => filterByCategory(c.category)}>
                   <div className="budget-bar-label">
-                    <span>{c.category}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: getCategoryColor(c.category), display: 'inline-block' }} />
+                      {c.category}
+                    </span>
                     <span>
                       <strong>{fmtShort(c.total)}</strong>
                       <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>({pct.toFixed(0)}%)</span>
                     </span>
                   </div>
                   <div className="progress-bar" style={{ height: 8, margin: '2px 0' }}>
-                    <div className="progress-fill" style={{ width: `${pct}%` }} />
+                    <div className="progress-fill" style={{ width: `${pct}%`, background: getCategoryColor(c.category) }} />
                   </div>
                 </div>
               );
@@ -554,35 +694,82 @@ export default function Expenses() {
                     {hasActiveFilters ? 'No expenses match the current filters.' : 'No expenses yet. Click "Add" to start tracking.'}
                   </td></tr>
                 ) : expenses.map(e => (
-                  <tr key={e.id}>
-                    <td>{e.expense_date}</td>
-                    <td>
-                      <span className="user-pill clickable" onClick={() => filterByUser(e.user_id)}>
-                        {e.user_name}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="tag tag-blue clickable" onClick={() => filterByCategory(e.category)}>{e.category}</span>
-                      {e.subcategory && <span style={{ marginLeft: 4, fontSize: '0.75rem', color: 'var(--text-muted)' }}>{e.subcategory}</span>}
-                    </td>
-                    <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{e.description || '-'}</td>
-                    <td style={{ fontWeight: 600 }}>
-                      {e.is_range ? (
-                        <span>{fmtMoney(e.range_low)} - {fmtMoney(e.range_high)}</span>
-                      ) : fmtMoney(e.amount)}
-                    </td>
-                    <td>
-                      <span className={`tag ${e.entry_type === 'estimated' ? 'tag-yellow' : 'tag-green'}`}>
-                        {e.entry_type === 'estimated' ? 'Est.' : 'Actual'}
-                      </span>
-                      {e.recurring ? <span className="tag tag-blue" style={{ marginLeft: 4 }}>Recurring</span> : null}
-                    </td>
-                    <td>
-                      <button className="btn btn-ghost btn-sm" onClick={() => handleDelete(e.id)} title="Delete">
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
-                  </tr>
+                  editingId === e.id ? (
+                    <tr key={e.id} className="inline-edit-row">
+                      <td>
+                        <input className="inline-edit-input" type="date" value={editForm.expense_date}
+                          onChange={ev => setEditForm({ ...editForm, expense_date: ev.target.value })} />
+                      </td>
+                      <td>
+                        <span className={`user-pill ${getUserClass(e.user_name)}`}>{e.user_name}</span>
+                      </td>
+                      <td>
+                        <select className="inline-edit-select" value={editForm.category}
+                          onChange={ev => setEditForm({ ...editForm, category: ev.target.value })}>
+                          {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                        </select>
+                      </td>
+                      <td>
+                        <input className="inline-edit-input" type="text" value={editForm.description}
+                          onChange={ev => setEditForm({ ...editForm, description: ev.target.value })}
+                          placeholder="Description" />
+                      </td>
+                      <td>
+                        <input className="inline-edit-input" type="number" step="0.01" value={editForm.amount}
+                          onChange={ev => setEditForm({ ...editForm, amount: ev.target.value })}
+                          style={{ width: 100 }} />
+                      </td>
+                      <td>
+                        <span className={`tag ${e.entry_type === 'estimated' ? 'tag-yellow' : 'tag-green'}`}>
+                          {e.entry_type === 'estimated' ? 'Est.' : 'Actual'}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="inline-edit-actions">
+                          <button className="save-btn" onClick={saveEdit} title="Save"><Check size={14} /></button>
+                          <button className="cancel-btn" onClick={cancelEdit} title="Cancel"><X size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={e.id}>
+                      <td>{e.expense_date}</td>
+                      <td>
+                        <span className={`user-pill ${getUserClass(e.user_name)} clickable`} onClick={() => filterByUser(e.user_id)}>
+                          {e.user_name}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="tag clickable" onClick={() => filterByCategory(e.category)}
+                          style={{ background: `${getCategoryColor(e.category)}22`, color: getCategoryColor(e.category) }}>
+                          {e.category}
+                        </span>
+                        {e.subcategory && <span style={{ marginLeft: 4, fontSize: '0.75rem', color: 'var(--text-muted)' }}>{e.subcategory}</span>}
+                      </td>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{e.description || '-'}</td>
+                      <td style={{ fontWeight: 600 }}>
+                        {e.is_range ? (
+                          <span>{fmtMoney(e.range_low)} - {fmtMoney(e.range_high)}</span>
+                        ) : fmtMoney(e.amount)}
+                      </td>
+                      <td>
+                        <span className={`tag ${e.entry_type === 'estimated' ? 'tag-yellow' : 'tag-green'}`}>
+                          {e.entry_type === 'estimated' ? 'Est.' : 'Actual'}
+                        </span>
+                        {e.recurring ? <span className="tag tag-blue" style={{ marginLeft: 4 }}>Recurring</span> : null}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '0.25rem' }}>
+                          <button className="btn btn-ghost btn-sm" onClick={() => startEdit(e)} title="Edit">
+                            <Edit3 size={14} />
+                          </button>
+                          <button className="btn btn-ghost btn-sm" onClick={() => handleDelete(e.id)} title="Delete">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
                 ))}
               </tbody>
             </table>
