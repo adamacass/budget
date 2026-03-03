@@ -103,6 +103,9 @@ export const deleteCategoryRule = (id) => apiFetch(`/api/category-rules/${id}`, 
 // Widget
 export const getWidgetData = () => apiFetch('/api/widget');
 
+// Daily Spending (custom range)
+export const getDailySpending = (days = 14) => apiFetch(`/api/daily-spending?days=${days}`);
+
 // Projections
 export const getProjections = () => apiFetch('/api/projections');
 

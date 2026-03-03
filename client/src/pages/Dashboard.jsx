@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getDashboard, getInsights, getLatestAdvice, addExpense, extractScreenshot, importScreenshot } from '../api';
+import { getDashboard, getInsights, getLatestAdvice, addExpense, extractScreenshot, importScreenshot, getDailySpending } from '../api';
 import { useAuth } from '../context/AuthContext';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
 import { useNavigate } from 'react-router-dom';
@@ -27,6 +27,11 @@ export default function Dashboard() {
   const [addedMsg, setAddedMsg] = useState('');
   const amountRef = useRef(null);
 
+  // Daily spending range
+  const [spendingRange, setSpendingRange] = useState(14);
+  const [spendingData, setSpendingData] = useState(null);
+  const [spendingLoading, setSpendingLoading] = useState(false);
+
   // Screenshot upload
   const [extracting, setExtracting] = useState(false);
   const [extracted, setExtracted] = useState(null); // { transactions: [...] }
@@ -42,6 +47,18 @@ export default function Dashboard() {
   }
 
   useEffect(() => { loadAll(); }, []);
+
+  useEffect(() => {
+    if (spendingRange === 14) {
+      setSpendingData(null); // use default insights data
+      return;
+    }
+    setSpendingLoading(true);
+    getDailySpending(spendingRange)
+      .then(r => setSpendingData(r.daily_spending))
+      .catch(console.error)
+      .finally(() => setSpendingLoading(false));
+  }, [spendingRange]);
 
   async function handleQuickAdd(e) {
     e.preventDefault();
@@ -502,37 +519,59 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ===== DAILY SPENDING + CATEGORY ===== */}
-      <div className="grid-2">
-        <div className="card">
-          <div className="card-title">Daily Spending (14 days)</div>
-          {insights?.daily_spending && (
-            <ResponsiveContainer width="100%" height={160}>
-              <AreaChart data={insights.daily_spending}>
-                <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }} />
-                <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
-                <Tooltip contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
-                  formatter={(v) => [fmtMoney(v), 'Spent']} />
-                <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
+      {/* ===== DAILY SPENDING ===== */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
+          <div className="card-title" style={{ margin: 0 }}>Daily Spending</div>
+          <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+            {[
+              { label: '2W', days: 14 },
+              { label: '1M', days: 30 },
+              { label: '3M', days: 90 },
+              { label: '6M', days: 180 },
+              { label: '1Y', days: 365 },
+            ].map(r => (
+              <button key={r.days}
+                className={`btn btn-sm ${spendingRange === r.days ? 'btn-primary' : 'btn-ghost'}`}
+                style={{ padding: '2px 8px', fontSize: '0.7rem', minWidth: 32 }}
+                onClick={() => setSpendingRange(r.days)}>
+                {r.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="card">
-          <div className="card-title">By Category</div>
-          {data.expenses_by_category.length > 0 ? (
-            <ResponsiveContainer width="100%" height={160}>
-              <PieChart>
-                <Pie data={data.expenses_by_category} dataKey="total" nameKey="category"
-                  cx="50%" cy="50%" outerRadius={60}
-                  label={({ category, total }) => `${category}: $${total.toFixed(0)}`}>
-                  {data.expenses_by_category.map((entry, i) => <Cell key={i} fill={getCategoryColor(entry.category)} />)}
-                </Pie>
-                <Tooltip formatter={(v) => '$' + v.toFixed(0)} />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No expenses yet.</p>}
-        </div>
+        {spendingLoading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}><div className="spinner" /></div>
+        ) : (
+          <ResponsiveContainer width="100%" height={200}>
+            <AreaChart data={spendingData || insights?.daily_spending || []}>
+              <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }}
+                interval={spendingRange > 60 ? Math.floor(spendingRange / 15) : spendingRange > 30 ? 2 : 0} />
+              <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+              <Tooltip contentStyle={{ background: '#1a1d27', border: '1px solid #2d3148', borderRadius: 8 }}
+                formatter={(v) => [fmtMoney(v), 'Spent']} />
+              <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* ===== BY CATEGORY ===== */}
+      <div className="card">
+        <div className="card-title">By Category</div>
+        {data.expenses_by_category.length > 0 ? (
+          <ResponsiveContainer width="100%" height={280}>
+            <PieChart>
+              <Pie data={data.expenses_by_category} dataKey="total" nameKey="category"
+                cx="50%" cy="50%" outerRadius={90} innerRadius={40}
+                label={({ category, total, percent }) => `${category} $${total.toFixed(0)} (${(percent * 100).toFixed(0)}%)`}
+                labelLine={{ stroke: '#8b8fa3', strokeWidth: 0.5 }}>
+                {data.expenses_by_category.map((entry, i) => <Cell key={i} fill={getCategoryColor(entry.category)} />)}
+              </Pie>
+              <Tooltip formatter={(v) => '$' + v.toFixed(0)} />
+            </PieChart>
+          </ResponsiveContainer>
+        ) : <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No expenses yet.</p>}
       </div>
 
       {/* ===== BUDGET TRACKER ===== */}

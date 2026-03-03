@@ -959,6 +959,29 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   });
 }));
 
+// ===================== DAILY SPENDING (custom range) =====================
+
+app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { days } = req.query;
+  const numDays = Math.min(Math.max(parseInt(days) || 14, 7), 365);
+
+  const dailySpending = [];
+  for (let d = numDays - 1; d >= 0; d--) {
+    const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
+    dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
+  }
+
+  // Also get the earliest expense date for the "Max" option
+  const earliest = (await db.query('SELECT MIN(expense_date) as min_date FROM expenses')).rows[0];
+
+  res.json({
+    daily_spending: dailySpending,
+    earliest_date: earliest?.min_date || null,
+  });
+}));
+
 // ===================== DASHBOARD / SUMMARY =====================
 
 app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
@@ -1283,12 +1306,24 @@ cron.schedule('0 11 * * *', async () => {
 
 app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
-  const today = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+
+  // Build Monday-based week boundaries
+  const todayDay = now.getDay();
+  const diffToMonday = todayDay === 0 ? 6 : todayDay - 1;
+  const thisMonday = new Date(now);
+  thisMonday.setDate(thisMonday.getDate() - diffToMonday);
+  thisMonday.setHours(0, 0, 0, 0);
+  const thisMondayStr = thisMonday.toISOString().split('T')[0];
+  const lastMonday = new Date(thisMonday);
+  lastMonday.setDate(lastMonday.getDate() - 7);
+  const lastMondayStr = lastMonday.toISOString().split('T')[0];
 
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
-  const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
+  const thisWeekExpenses = (await db.query('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date >= $1', [thisMondayStr])).rows[0];
+  const lastWeekExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND expense_date < $2', [lastMondayStr, thisMondayStr])).rows[0];
   const todayExpenses = (await db.query('SELECT SUM(amount) as total, COUNT(*) as count FROM expenses WHERE expense_date = $1', [today])).rows[0];
 
   // Budget data
@@ -1303,6 +1338,10 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   const dailyAvg = totalMonth / daysElapsed;
   const projectedMonthly = dailyAvg * 30;
   const pacePercent = monthlyBudget > 0 ? Math.round((projectedMonthly / monthlyBudget) * 100) : 0;
+
+  const thisWeekTotal = parseFloat(thisWeekExpenses.total) || 0;
+  const lastWeekTotal = parseFloat(lastWeekExpenses.total) || 0;
+  const weekChange = lastWeekTotal > 0 ? Math.round(((thisWeekTotal - lastWeekTotal) / lastWeekTotal) * 100) : 0;
 
   // Per-user last expense tracking
   const users = (await db.query('SELECT id, display_name, username FROM users')).rows;
@@ -1333,10 +1372,20 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   // Offset balance
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1", ['offset'])).rows[0];
 
+  // Daily breakdown for mini sparkline (last 7 days)
+  const dailyBreakdown = [];
+  for (let d = 6; d >= 0; d--) {
+    const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    const row = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date = $1', [date])).rows[0];
+    dailyBreakdown.push({ date: date.substring(5), total: parseFloat(row.total) || 0 });
+  }
+
   res.json({
     today_spent: parseFloat(todayExpenses.total) || 0,
     today_count: parseInt(todayExpenses.count),
-    week_spent: parseFloat(weeklyExpenses.total) || 0,
+    this_week_spent: thisWeekTotal,
+    last_week_spent: lastWeekTotal,
+    week_change: weekChange,
     month_spent: totalMonth,
     daily_average: Math.round(dailyAvg),
     projected_monthly: Math.round(projectedMonthly),
@@ -1347,6 +1396,46 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
     offset_balance: offsetRow ? offsetRow.balance : 0,
     top_categories: topCategories,
     users: userActivity,
+    daily_breakdown: dailyBreakdown,
+  });
+}));
+
+// ===================== QUICK ADD (for iOS Shortcuts / automation) =====================
+
+app.post('/api/quick-add', authMiddleware, asyncHandler(async (req, res) => {
+  const { amount, description, category } = req.body;
+  if (!amount || parseFloat(amount) <= 0) {
+    return res.status(400).json({ error: 'Amount is required and must be positive' });
+  }
+  const db = await getDb();
+  const learnedRules = await getCategoryRules();
+  const resolvedCategory = category || (description ? autoCategorizeTxn(description, learnedRules) : 'Other');
+  const expenseDate = new Date().toISOString().split('T')[0];
+
+  const result = await db.query(
+    'INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, is_range, recurring) VALUES ($1, $2, $3, $4, $5, $6, 0, 0) RETURNING id',
+    [req.user.id, resolvedCategory, description || resolvedCategory, parseFloat(amount), expenseDate, 'actual']
+  );
+
+  // Learn category rule if a category was explicitly provided
+  if (category && category !== 'Other' && description) {
+    const pattern = extractSupplierPattern(description);
+    if (pattern && pattern.length >= 3) {
+      await db.query(
+        'INSERT INTO category_rules (supplier_pattern, category, created_by) VALUES ($1, $2, $3) ON CONFLICT (supplier_pattern) DO UPDATE SET category = $2',
+        [pattern, category, req.user.id]
+      );
+    }
+  }
+
+  res.json({
+    success: true,
+    id: result.rows[0].id,
+    category: resolvedCategory,
+    amount: parseFloat(amount),
+    description: description || resolvedCategory,
+    date: expenseDate,
+    message: `Added $${parseFloat(amount).toFixed(2)} ${resolvedCategory}`
   });
 }));
 

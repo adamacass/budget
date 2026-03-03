@@ -114,6 +114,9 @@ export default function Settings() {
         <button className={`tab ${tab === 'widget' ? 'active' : ''}`} onClick={() => setTab('widget')}>
           <Smartphone size={14} style={{ marginRight: 4 }} /> iPhone Widget
         </button>
+        <button className={`tab ${tab === 'shortcuts' ? 'active' : ''}`} onClick={() => setTab('shortcuts')}>
+          <Smartphone size={14} style={{ marginRight: 4 }} /> iOS Shortcuts
+        </button>
       </div>
 
       {tab === 'profile' && (
@@ -347,7 +350,7 @@ export default function Settings() {
         <div className="card">
           <div className="card-title"><Smartphone size={14} /> iPhone Widget (Scriptable)</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-            Add a budget widget to your iPhone home screen using the free <strong>Scriptable</strong> app.
+            Add a beautiful budget widget with corgi mascot to your iPhone home screen using the free <strong>Scriptable</strong> app.
           </p>
 
           <div style={{ marginBottom: '1rem' }}>
@@ -388,8 +391,8 @@ export default function Settings() {
               <Copy size={14} /> Copy Code
             </button>
           </div>
-          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Budget Widget for Scriptable
-// Shows daily/weekly/monthly spending, budget pace, and per-user activity
+          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Budget Corgi Widget for Scriptable
+// Beautiful widget with drawn corgi, week-vs-week comparison, and sparkline
 
 const BASE_URL = "${window.location.origin}";
 const TOKEN = "PASTE_YOUR_TOKEN_HERE";
@@ -402,124 +405,267 @@ async function fetchWidget() {
 
 function fmt(n) { return "$" + Math.round(n).toLocaleString(); }
 
-function timeAgo(dateStr) {
-  if (!dateStr) return "Never";
-  const ms = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(ms / 60000);
-  if (mins < 60) return mins + "m ago";
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + "h ago";
-  const days = Math.floor(hrs / 24);
-  return days + "d ago";
+function drawCorgi(ctx, x, y, size, happy) {
+  // Golden corgi body
+  const s = size / 50;
+  // Body
+  ctx.setFillColor(new Color("#D4943A"));
+  ctx.fillEllipse(new Rect(x + 8*s, y + 18*s, 34*s, 22*s));
+  // Head
+  ctx.fillEllipse(new Rect(x + 2*s, y + 8*s, 22*s, 20*s));
+  // White face marking
+  ctx.setFillColor(new Color("#FFF5E0"));
+  ctx.fillEllipse(new Rect(x + 6*s, y + 14*s, 14*s, 14*s));
+  // Left ear
+  ctx.setFillColor(new Color("#C4842A"));
+  const earPts = [
+    new Point(x + 4*s, y + 12*s),
+    new Point(x + 1*s, y + 0*s),
+    new Point(x + 12*s, y + 10*s),
+  ];
+  const ear = new Path();
+  ear.move(earPts[0]);
+  ear.addLine(earPts[1]);
+  ear.addLine(earPts[2]);
+  ear.closeSubpath();
+  ctx.addPath(ear);
+  ctx.fillPath();
+  // Right ear
+  const rEar = new Path();
+  rEar.move(new Point(x + 14*s, y + 12*s));
+  rEar.addLine(new Point(x + 22*s, y + 0*s));
+  rEar.addLine(new Point(x + 20*s, y + 10*s));
+  rEar.closeSubpath();
+  ctx.addPath(rEar);
+  ctx.fillPath();
+  // Inner ears
+  ctx.setFillColor(new Color("#FFBFA0"));
+  const iEar = new Path();
+  iEar.move(new Point(x + 5*s, y + 12*s));
+  iEar.addLine(new Point(x + 3*s, y + 4*s));
+  iEar.addLine(new Point(x + 10*s, y + 11*s));
+  iEar.closeSubpath();
+  ctx.addPath(iEar);
+  ctx.fillPath();
+  const iREar = new Path();
+  iREar.move(new Point(x + 15*s, y + 12*s));
+  iREar.addLine(new Point(x + 20*s, y + 4*s));
+  iREar.addLine(new Point(x + 19*s, y + 11*s));
+  iREar.closeSubpath();
+  ctx.addPath(iREar);
+  ctx.fillPath();
+  // Eyes
+  ctx.setFillColor(new Color("#2d2d2d"));
+  ctx.fillEllipse(new Rect(x + 8*s, y + 17*s, 3*s, 3*s));
+  ctx.fillEllipse(new Rect(x + 15*s, y + 17*s, 3*s, 3*s));
+  // Eye shine
+  ctx.setFillColor(new Color("#FFFFFF"));
+  ctx.fillEllipse(new Rect(x + 9*s, y + 17.5*s, 1.2*s, 1.2*s));
+  ctx.fillEllipse(new Rect(x + 16*s, y + 17.5*s, 1.2*s, 1.2*s));
+  // Nose
+  ctx.setFillColor(new Color("#2d2d2d"));
+  ctx.fillEllipse(new Rect(x + 11*s, y + 22*s, 4*s, 3*s));
+  // Mouth / tongue
+  if (happy) {
+    ctx.setFillColor(new Color("#FF7979"));
+    ctx.fillEllipse(new Rect(x + 11.5*s, y + 25*s, 3*s, 4*s));
+  } else {
+    // Sad eyebrows
+    ctx.setStrokeColor(new Color("#2d2d2d"));
+    ctx.setLineWidth(1.5*s);
+    const lBrow = new Path();
+    lBrow.move(new Point(x + 7*s, y + 15*s));
+    lBrow.addLine(new Point(x + 11*s, y + 16*s));
+    ctx.addPath(lBrow); ctx.strokePath();
+    const rBrow = new Path();
+    rBrow.move(new Point(x + 19*s, y + 15*s));
+    rBrow.addLine(new Point(x + 15*s, y + 16*s));
+    ctx.addPath(rBrow); ctx.strokePath();
+  }
+  // Legs
+  ctx.setFillColor(new Color("#D4943A"));
+  ctx.fillRect(new Rect(x + 12*s, y + 35*s, 5*s, 8*s));
+  ctx.fillRect(new Rect(x + 22*s, y + 35*s, 5*s, 8*s));
+  ctx.fillRect(new Rect(x + 30*s, y + 35*s, 5*s, 8*s));
+  // Fluffy butt
+  ctx.fillEllipse(new Rect(x + 34*s, y + 18*s, 12*s, 16*s));
+  // Tail (wagging up for happy, down for sad)
+  ctx.setFillColor(new Color("#C4842A"));
+  const tail = new Path();
+  if (happy) {
+    tail.move(new Point(x + 42*s, y + 20*s));
+    tail.addCurve(new Point(x + 48*s, y + 8*s), new Point(x + 44*s, y + 14*s), new Point(x + 50*s, y + 10*s));
+    tail.addLine(new Point(x + 46*s, y + 10*s));
+    tail.addCurve(new Point(x + 42*s, y + 22*s), new Point(x + 48*s, y + 12*s), new Point(x + 42*s, y + 16*s));
+  } else {
+    tail.move(new Point(x + 42*s, y + 28*s));
+    tail.addCurve(new Point(x + 46*s, y + 38*s), new Point(x + 44*s, y + 32*s), new Point(x + 48*s, y + 36*s));
+    tail.addLine(new Point(x + 44*s, y + 38*s));
+    tail.addCurve(new Point(x + 42*s, y + 30*s), new Point(x + 46*s, y + 36*s), new Point(x + 42*s, y + 32*s));
+  }
+  tail.closeSubpath();
+  ctx.addPath(tail);
+  ctx.fillPath();
+}
+
+function drawSparkline(ctx, data, x, y, w, h, color) {
+  if (!data || data.length < 2) return;
+  const max = Math.max(...data.map(d => d.total), 1);
+  const step = w / (data.length - 1);
+  // Fill area
+  const area = new Path();
+  area.move(new Point(x, y + h));
+  for (let i = 0; i < data.length; i++) {
+    const px = x + i * step;
+    const py = y + h - (data[i].total / max) * h;
+    area.addLine(new Point(px, py));
+  }
+  area.addLine(new Point(x + w, y + h));
+  area.closeSubpath();
+  ctx.setFillColor(new Color(color, 0.15));
+  ctx.addPath(area);
+  ctx.fillPath();
+  // Stroke line
+  ctx.setStrokeColor(new Color(color));
+  ctx.setLineWidth(1.5);
+  const line = new Path();
+  for (let i = 0; i < data.length; i++) {
+    const px = x + i * step;
+    const py = y + h - (data[i].total / max) * h;
+    if (i === 0) line.move(new Point(px, py));
+    else line.addLine(new Point(px, py));
+  }
+  ctx.addPath(line);
+  ctx.strokePath();
+  // Dot on latest point
+  const lastX = x + (data.length - 1) * step;
+  const lastY = y + h - (data[data.length - 1].total / max) * h;
+  ctx.setFillColor(new Color(color));
+  ctx.fillEllipse(new Rect(lastX - 2.5, lastY - 2.5, 5, 5));
 }
 
 try {
   const d = await fetchWidget();
-  const w = new ListWidget();
-  w.backgroundColor = new Color("#0f1117");
-  w.setPadding(12, 14, 12, 14);
+  const W = 338, H = 155;
+  const ctx = new DrawContext();
+  ctx.size = new Size(W, H);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
 
-  // Title row
-  const titleStack = w.addStack();
-  titleStack.layoutHorizontally();
-  titleStack.centerAlignContent();
-  const corgi = titleStack.addText(d.under_budget ? "\\u{1F436}" : "\\u{1F61E}");
-  corgi.font = Font.systemFont(14);
-  titleStack.addSpacer(4);
-  const title = titleStack.addText("Budget Tracker");
-  title.font = Font.boldSystemFont(13);
-  title.textColor = new Color("#e8eaf0");
-  titleStack.addSpacer();
-  const paceText = titleStack.addText(d.pace_percent + "%");
-  paceText.font = Font.boldSystemFont(13);
-  paceText.textColor = d.under_budget ? new Color("#00cec9") : new Color("#ff6b6b");
+  // Background gradient
+  ctx.setFillColor(new Color("#0f1117"));
+  ctx.fillRect(new Rect(0, 0, W, H));
+  // Subtle gradient overlay
+  ctx.setFillColor(new Color("#161927", 0.6));
+  ctx.fillRect(new Rect(0, 0, W, H * 0.5));
 
-  w.addSpacer(6);
+  // Draw corgi in top-right
+  drawCorgi(ctx, W - 68, 6, 58, d.under_budget);
 
-  // Spending row
-  const spendStack = w.addStack();
-  spendStack.layoutHorizontally();
-  const cols = [
-    { label: "Today", value: fmt(d.today_spent), color: "#e8eaf0" },
-    { label: "Week", value: fmt(d.week_spent), color: "#54a0ff" },
-    { label: "Month", value: fmt(d.month_spent), color: "#6c5ce7" },
-    { label: "Budget", value: fmt(d.monthly_budget), color: "#00cec9" },
-  ];
-  for (const col of cols) {
-    const c = spendStack.addStack();
-    c.layoutVertically();
-    const lbl = c.addText(col.label);
-    lbl.font = Font.systemFont(9);
-    lbl.textColor = new Color("#8b8fa3");
-    const val = c.addText(col.value);
-    val.font = Font.boldSystemFont(12);
-    val.textColor = new Color(col.color);
-    spendStack.addSpacer();
+  // Title
+  ctx.setFont(Font.boldSystemFont(14));
+  ctx.setTextColor(new Color("#e8eaf0"));
+  ctx.drawTextInRect("Budget Corgi", new Rect(12, 8, 200, 20));
+
+  // Pace badge
+  const paceColor = d.under_budget ? "#00cec9" : "#ff6b6b";
+  ctx.setFillColor(new Color(paceColor, 0.18));
+  const paceText = d.pace_percent + "% pace";
+  ctx.fillRect(new Rect(12, 28, 72, 18));
+  ctx.setFont(Font.boldSystemFont(10));
+  ctx.setTextColor(new Color(paceColor));
+  ctx.drawTextInRect(paceText, new Rect(16, 30, 65, 16));
+
+  // Week-vs-week comparison
+  const weekChangeSign = d.week_change >= 0 ? "+" : "";
+  const weekColor = d.week_change <= 0 ? "#00cec9" : "#ff6b6b";
+  const weekArrow = d.week_change <= 0 ? "\\u2193" : "\\u2191";
+
+  ctx.setFont(Font.systemFont(9));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect("This week", new Rect(12, 52, 60, 14));
+  ctx.drawTextInRect("Last week", new Rect(12, 78, 60, 14));
+  ctx.drawTextInRect("vs", new Rect(12, 98, 20, 14));
+
+  ctx.setFont(Font.boldSystemFont(16));
+  ctx.setTextColor(new Color("#e8eaf0"));
+  ctx.drawTextInRect(fmt(d.this_week_spent), new Rect(70, 49, 100, 20));
+
+  ctx.setFont(Font.systemFont(13));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  ctx.drawTextInRect(fmt(d.last_week_spent), new Rect(70, 76, 100, 18));
+
+  ctx.setFont(Font.boldSystemFont(12));
+  ctx.setTextColor(new Color(weekColor));
+  ctx.drawTextInRect(weekArrow + " " + weekChangeSign + d.week_change + "%", new Rect(32, 96, 80, 16));
+
+  // Sparkline (last 7 days)
+  const sparkColor = d.under_budget ? "#00cec9" : "#ff6b6b";
+  drawSparkline(ctx, d.daily_breakdown, 140, 50, 120, 44, sparkColor);
+
+  // Day labels under sparkline
+  ctx.setFont(Font.systemFont(6));
+  ctx.setTextColor(new Color("#8b8fa3"));
+  if (d.daily_breakdown && d.daily_breakdown.length >= 7) {
+    const step = 120 / 6;
+    for (let i = 0; i < 7; i++) {
+      ctx.drawTextInRect(d.daily_breakdown[i].date, new Rect(140 + i * step - 8, 96, 20, 10));
+    }
   }
 
-  w.addSpacer(6);
+  // Bottom row: Monthly stats
+  const bottomY = 115;
+  ctx.setFillColor(new Color("#1a1d27"));
+  ctx.fillRect(new Rect(0, bottomY - 4, W, H - bottomY + 4));
 
   // Progress bar
-  const barStack = w.addStack();
-  barStack.layoutHorizontally();
-  barStack.cornerRadius = 3;
-  barStack.size = new Size(0, 6);
-  barStack.backgroundColor = new Color("#2d3148");
-  const fillWidth = Math.min(d.pace_percent, 100);
-  const fillColor = d.pace_percent <= 90 ? "#00cec9" : d.pace_percent <= 100 ? "#feca57" : "#ff6b6b";
-  const barCtx = new DrawContext();
-  barCtx.size = new Size(300, 6);
-  barCtx.opaque = false;
-  barCtx.setFillColor(new Color("#2d3148"));
-  barCtx.fillRect(new Rect(0, 0, 300, 6));
-  barCtx.setFillColor(new Color(fillColor));
-  barCtx.fillRect(new Rect(0, 0, fillWidth * 3, 6));
-  const barImg = w.addImage(barCtx.getImage());
-  barImg.cornerRadius = 3;
-  barImg.imageSize = new Size(0, 6);
+  const barY = bottomY + 2;
+  const barW = W - 24;
+  ctx.setFillColor(new Color("#2d3148"));
+  ctx.fillRect(new Rect(12, barY, barW, 5));
+  const fillPct = Math.min(d.pace_percent, 100) / 100;
+  const barColor = d.pace_percent <= 90 ? "#00cec9" : d.pace_percent <= 100 ? "#feca57" : "#ff6b6b";
+  ctx.setFillColor(new Color(barColor));
+  ctx.fillRect(new Rect(12, barY, barW * fillPct, 5));
 
-  w.addSpacer(6);
+  // Monthly totals row
+  const statY = barY + 12;
+  const statCols = [
+    { label: "Today", value: fmt(d.today_spent), color: "#e8eaf0" },
+    { label: "Month", value: fmt(d.month_spent), color: "#6c5ce7" },
+    { label: "Budget", value: fmt(d.monthly_budget), color: "#00cec9" },
+    { label: "Projected", value: fmt(d.projected_monthly), color: d.under_budget ? "#00cec9" : "#ff6b6b" },
+  ];
+  const colW = (W - 24) / statCols.length;
+  for (let i = 0; i < statCols.length; i++) {
+    const cx = 12 + i * colW;
+    ctx.setFont(Font.systemFont(7));
+    ctx.setTextColor(new Color("#8b8fa3"));
+    ctx.drawTextInRect(statCols[i].label, new Rect(cx, statY, colW, 10));
+    ctx.setFont(Font.boldSystemFont(10));
+    ctx.setTextColor(new Color(statCols[i].color));
+    ctx.drawTextInRect(statCols[i].value, new Rect(cx, statY + 10, colW, 14));
+  }
 
-  // Per-user activity
+  // Per-user dots (top-right, below corgi)
+  let userY = 54;
+  ctx.setFont(Font.systemFont(8));
   for (const u of d.users) {
-    const uStack = w.addStack();
-    uStack.layoutHorizontally();
-    uStack.centerAlignContent();
     const nameColor = u.name.toLowerCase().includes("adam") ? "#6c5ce7" : "#00cec9";
-    const dot = uStack.addText("\\u25CF ");
-    dot.font = Font.systemFont(10);
-    dot.textColor = new Color(nameColor);
-    const nm = uStack.addText(u.name);
-    nm.font = Font.mediumSystemFont(10);
-    nm.textColor = new Color("#e8eaf0");
-    uStack.addSpacer(4);
-    const amt = uStack.addText(fmt(u.month_total));
-    amt.font = Font.systemFont(10);
-    amt.textColor = new Color("#8b8fa3");
-    uStack.addSpacer();
-    const lastAdded = uStack.addText(timeAgo(u.last_added_at));
-    lastAdded.font = Font.systemFont(9);
-    lastAdded.textColor = u.days_since_last !== null && u.days_since_last <= 1
-      ? new Color("#00cec9") : new Color("#ff6b6b");
+    ctx.setFillColor(new Color(nameColor));
+    ctx.fillEllipse(new Rect(W - 66, userY + 2, 5, 5));
+    ctx.setTextColor(new Color("#e8eaf0"));
+    ctx.drawTextInRect(u.name.split(" ")[0], new Rect(W - 58, userY, 30, 12));
+    ctx.setTextColor(new Color("#8b8fa3"));
+    ctx.drawTextInRect(fmt(u.month_total), new Rect(W - 30, userY, 28, 12));
+    userY += 14;
   }
 
-  w.addSpacer(4);
-
-  // Top categories
-  const catStack = w.addStack();
-  catStack.layoutHorizontally();
-  for (const cat of d.top_categories.slice(0, 3)) {
-    const cs = catStack.addStack();
-    cs.layoutHorizontally();
-    cs.centerAlignContent();
-    cs.setPadding(2, 6, 2, 6);
-    cs.cornerRadius = 4;
-    cs.backgroundColor = new Color("#1a1d27");
-    const ct = cs.addText(cat.category.substring(0, 6) + " " + fmt(cat.total));
-    ct.font = Font.systemFont(8);
-    ct.textColor = new Color("#8b8fa3");
-    catStack.addSpacer(4);
-  }
+  // Build widget
+  const w = new ListWidget();
+  w.backgroundColor = new Color("#0f1117");
+  w.backgroundImage = ctx.getImage();
+  w.setPadding(0, 0, 0, 0);
 
   if (config.runsInWidget) {
     Script.setWidget(w);
@@ -537,6 +683,124 @@ try {
 }
 
 Script.complete();`}</pre>
+        </div>
+      )}
+
+      {tab === 'shortcuts' && (
+        <div className="card">
+          <div className="card-title"><Smartphone size={14} /> iOS Shortcuts — Auto-Record from Notifications</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Automatically record expenses when your bank sends a push notification. Uses the iOS Shortcuts app
+            with a <strong>Personal Automation</strong> triggered by notifications.
+          </p>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>How it Works</h4>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.7 }}>
+              When your bank app sends a notification like <em>"You spent $42.50 at Woolworths"</em>,
+              the Shortcut extracts the amount and description, then calls your budget app's Quick Add API.
+              The app auto-categorises the expense using your learned category rules.
+            </p>
+          </div>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Setup Instructions</h4>
+            <ol style={{ fontSize: '0.82rem', lineHeight: 2, paddingLeft: '1.25rem', color: 'var(--text-muted)' }}>
+              <li>Open the <strong>Shortcuts</strong> app on your iPhone</li>
+              <li>Tap <strong>Automation</strong> tab at the bottom</li>
+              <li>Tap <strong>+</strong> → <strong>Create Personal Automation</strong></li>
+              <li>Scroll down and choose <strong>Notification</strong></li>
+              <li>Select your <strong>bank app</strong> (e.g. CommBank, Westpac, ANZ, NAB)</li>
+              <li>Choose <strong>"Contains"</strong> and enter a keyword like <code>spent</code> or <code>purchase</code></li>
+              <li>Tap <strong>Next</strong>, then add the actions below in order</li>
+              <li>Turn <strong>OFF</strong> "Ask Before Running" so it runs automatically</li>
+            </ol>
+          </div>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Your API Endpoint</h4>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <code style={{ fontSize: '0.7rem', padding: '0.5rem', background: 'var(--bg-input)', borderRadius: 6, wordBreak: 'break-all' }}>
+                POST {window.location.origin}/api/quick-add
+              </code>
+              <button className="btn btn-ghost btn-sm" onClick={() => {
+                navigator.clipboard.writeText(window.location.origin + '/api/quick-add');
+                alert('URL copied');
+              }}>
+                <Copy size={14} /> Copy URL
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Auth Token</h4>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <code style={{ fontSize: '0.7rem', padding: '0.5rem', background: 'var(--bg-input)', borderRadius: 6, wordBreak: 'break-all', flex: 1 }}>
+                {localStorage.getItem('token')?.substring(0, 40)}...
+              </code>
+              <button className="btn btn-ghost btn-sm" onClick={() => {
+                navigator.clipboard.writeText(localStorage.getItem('token') || '');
+                alert('Token copied');
+              }}>
+                <Copy size={14} /> Copy
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '1rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Shortcut Actions (step by step)</h4>
+            <div style={{ background: 'var(--bg-input)', borderRadius: 8, padding: '1rem', fontSize: '0.8rem', lineHeight: 1.9 }}>
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Action 1: Get text from Shortcut Input</p>
+              <p style={{ color: 'var(--text-muted)' }}>This gives you the notification body text.</p>
+
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 2: Match Text</p>
+              <p style={{ color: 'var(--text-muted)' }}>Pattern: <code style={{ background: 'var(--bg-card)', padding: '2px 6px', borderRadius: 4 }}>\$[\d,.]+</code></p>
+              <p style={{ color: 'var(--text-muted)' }}>Input: <em>Text from Step 1</em></p>
+
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 3: Get Item from List</p>
+              <p style={{ color: 'var(--text-muted)' }}>Get <strong>First Item</strong> from <em>Matches from Step 2</em></p>
+
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 4: Replace Text</p>
+              <p style={{ color: 'var(--text-muted)' }}>Find <code>$</code> and <code>,</code> — replace with nothing. This gives you the raw number.</p>
+
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 5: Get Contents of URL</p>
+              <p style={{ color: 'var(--text-muted)' }}>
+                URL: <code style={{ background: 'var(--bg-card)', padding: '2px 6px', borderRadius: 4 }}>{window.location.origin}/api/quick-add</code><br/>
+                Method: <strong>POST</strong><br/>
+                Headers: <code>Authorization</code> = <code>Bearer YOUR_TOKEN</code><br/>
+                Headers: <code>Content-Type</code> = <code>application/json</code><br/>
+                Body (JSON):<br/>
+                <code style={{ background: 'var(--bg-card)', padding: '4px 8px', borderRadius: 4, display: 'inline-block', marginTop: 4 }}>
+                  {`{"amount": [Result from Step 4], "description": [Text from Step 1]}`}
+                </code>
+              </p>
+
+              <p style={{ fontWeight: 600, marginBottom: '0.5rem', marginTop: '0.75rem' }}>Action 6 (Optional): Show Notification</p>
+              <p style={{ color: 'var(--text-muted)' }}>
+                Title: "Budget recorded"<br/>
+                Body: <em>Result from Step 5</em> — this will show the category it was auto-assigned to.
+              </p>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '0.5rem' }}>
+            <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Quick Test (cURL)</h4>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+              Test the API from your terminal to make sure it works:
+            </p>
+            <pre style={{ fontSize: '0.65rem', padding: '0.75rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`curl -X POST ${window.location.origin}/api/quick-add \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"amount": 42.50, "description": "Woolworths Town Hall"}'`}</pre>
+            <button className="btn btn-ghost btn-sm" style={{ marginTop: '0.5rem' }} onClick={() => {
+              const token = localStorage.getItem('token') || 'YOUR_TOKEN';
+              const cmd = `curl -X POST ${window.location.origin}/api/quick-add -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"amount": 42.50, "description": "Woolworths Town Hall"}'`;
+              navigator.clipboard.writeText(cmd);
+              alert('cURL command copied with your token');
+            }}>
+              <Copy size={14} /> Copy with Token
+            </button>
+          </div>
         </div>
       )}
     </div>
