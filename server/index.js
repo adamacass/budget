@@ -12,6 +12,10 @@ const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransa
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// All data analysis starts from this date
+const DATA_START_DATE = '2026-01-01';
+function clampDate(date) { return date < DATA_START_DATE ? DATA_START_DATE : date; }
+
 // Wrap async route handlers so unhandled rejections return 500 instead of crashing
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -293,13 +297,13 @@ app.get('/api/expenses/summary', authMiddleware, asyncHandler(async (req, res) =
   const weekStart = new Date(now);
   weekStart.setDate(weekStart.getDate() - diffToMonday);
   weekStart.setHours(0, 0, 0, 0);
-  const weekStartStr = weekStart.toISOString().split('T')[0];
+  const weekStartStr = clampDate(weekStart.toISOString().split('T')[0]);
 
   // Month start
-  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const monthStart = clampDate(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
 
   // Year start
-  const yearStart = `${now.getFullYear()}-01-01`;
+  const yearStart = clampDate(`${now.getFullYear()}-01-01`);
 
   const users = (await db.query('SELECT id, display_name FROM users')).rows;
 
@@ -556,7 +560,7 @@ app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, r
   const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
 
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
   const recentExpenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1 ORDER BY expense_date DESC', [thirtyDaysAgo])).rows;
   const upcomingExpenses = (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
@@ -744,7 +748,7 @@ function parseStatementDate(raw) {
 
 app.post('/api/claude/nightly-summary', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
   const today = new Date().toISOString().split('T')[0];
 
   const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
@@ -869,7 +873,7 @@ app.put('/api/budgets/:category', authMiddleware, asyncHandler(async (req, res) 
 app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
 
   // Per-user activity
   const users = (await db.query('SELECT id, display_name, username FROM users')).rows;
@@ -908,10 +912,11 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const daysElapsed = Math.max(1, Math.floor((Date.now() - new Date(thirtyDaysAgo + 'T00:00:00').getTime()) / 86400000));
   const dailyAvg = (parseFloat(totalMonth.total) || 0) / daysElapsed;
 
-  // Daily spending (last 14 days)
+  // Daily spending (last 14 days, clamped to DATA_START_DATE)
   const dailySpending = [];
   for (let d = 13; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
     dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
   }
@@ -971,6 +976,7 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
   const dailySpending = [];
   for (let d = numDays - 1; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
     dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
   }
@@ -989,8 +995,8 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
 app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const today = new Date().toISOString().split('T')[0];
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
+  const sevenDaysAgo = clampDate(new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]);
 
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
   const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
@@ -1175,7 +1181,7 @@ app.get('/api/export', authMiddleware, asyncHandler(async (req, res) => {
 app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const users = (await db.query('SELECT * FROM users')).rows;
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
 
   // Calculate combined net income (rough estimate)
@@ -1284,7 +1290,7 @@ cron.schedule('0 11 * * *', async () => {
   console.log('Running nightly Claude summary...');
   try {
     const db = await getDb();
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+    const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
     const today = new Date().toISOString().split('T')[0];
     const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
     const incomes = (await db.query('SELECT * FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows;
@@ -1310,7 +1316,7 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const now = new Date();
   const today = now.toISOString().split('T')[0];
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
 
   // Build Monday-based week boundaries
   const todayDay = now.getDay();
@@ -1345,13 +1351,14 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   const lastWeekTotal = parseFloat(lastWeekExpenses.total) || 0;
   const weekChange = lastWeekTotal > 0 ? Math.round(((thisWeekTotal - lastWeekTotal) / lastWeekTotal) * 100) : 0;
 
-  // Per-user last expense tracking
+  // Per-user last expense tracking + this week comparison
   const users = (await db.query('SELECT id, display_name, username FROM users')).rows;
   const userActivity = [];
   for (const u of users) {
     const lastExpense = (await db.query('SELECT expense_date, created_at FROM expenses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [u.id])).rows[0];
     const monthCount = (await db.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
     const monthTotal = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thirtyDaysAgo])).rows[0];
+    const weekTotal = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND expense_date >= $2', [u.id, thisMondayStr])).rows[0];
     const daysSince = lastExpense?.created_at
       ? Math.floor((Date.now() - new Date(lastExpense.created_at).getTime()) / 86400000)
       : null;
@@ -1362,6 +1369,8 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
       days_since_last: daysSince,
       month_count: parseInt(monthCount.cnt),
       month_total: parseFloat(monthTotal.total) || 0,
+      week_total: parseFloat(weekTotal.total) || 0,
+      week_count: parseInt(weekTotal.cnt),
     });
   }
 
@@ -1378,6 +1387,7 @@ app.get('/api/widget', authMiddleware, asyncHandler(async (req, res) => {
   const dailyBreakdown = [];
   for (let d = 6; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
+    if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date = $1', [date])).rows[0];
     dailyBreakdown.push({ date: date.substring(5), total: parseFloat(row.total) || 0 });
   }
