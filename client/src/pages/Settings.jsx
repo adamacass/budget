@@ -391,8 +391,8 @@ export default function Settings() {
               <Copy size={14} /> Copy Code
             </button>
           </div>
-          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Adam + Aruto Budget — Scriptable Widget
-// Light/dark mode, this-week comparison, corgi mascot
+          <pre id="scriptable-code" style={{ fontSize: '0.65rem', lineHeight: 1.5, padding: '1rem', background: 'var(--bg-input)', borderRadius: 8, overflow: 'auto', maxHeight: 400, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{`// Budget Widget — Scriptable
+// Minimal, clean design with dark/light support
 
 const BASE_URL = "${window.location.origin}";
 const TOKEN = "PASTE_YOUR_TOKEN_HERE";
@@ -412,7 +412,6 @@ function timeAgo(ds) {
   return ds + "d ago";
 }
 
-// ── Rounded rect helper ──
 function roundedRect(ctx, x, y, w, h, r, color) {
   const p = new Path();
   p.move(new Point(x + r, y));
@@ -429,86 +428,21 @@ function roundedRect(ctx, x, y, w, h, r, color) {
   ctx.addPath(p); ctx.fillPath();
 }
 
-// ── Corgi (compact, clean) ──
-function drawCorgi(ctx, x, y, s, happy) {
-  ctx.setFillColor(new Color("#E8A832"));
-  ctx.fillEllipse(new Rect(x+6*s,y+12*s,28*s,16*s));
-  ctx.fillEllipse(new Rect(x+28*s,y+11*s,10*s,14*s));
-  ctx.setFillColor(new Color("#FFF5E0"));
-  ctx.fillEllipse(new Rect(x+10*s,y+18*s,20*s,10*s));
-  ctx.setFillColor(new Color("#E8A832"));
-  ctx.fillEllipse(new Rect(x,y+4*s,18*s,16*s));
-  ctx.setFillColor(new Color("#FFF5E0"));
-  ctx.fillEllipse(new Rect(x+4*s,y+10*s,10*s,10*s));
-  // Ears
-  ctx.setFillColor(new Color("#D4943A"));
-  let p = new Path();
-  p.move(new Point(x+2*s,y+8*s)); p.addLine(new Point(x,y)); p.addLine(new Point(x+8*s,y+6*s));
-  p.closeSubpath(); ctx.addPath(p); ctx.fillPath();
-  p = new Path();
-  p.move(new Point(x+12*s,y+8*s)); p.addLine(new Point(x+17*s,y)); p.addLine(new Point(x+16*s,y+6*s));
-  p.closeSubpath(); ctx.addPath(p); ctx.fillPath();
-  // Inner ears
-  ctx.setFillColor(new Color("#FFD0B5"));
-  p = new Path();
-  p.move(new Point(x+3*s,y+8*s)); p.addLine(new Point(x+2*s,y+3*s)); p.addLine(new Point(x+7*s,y+7*s));
-  p.closeSubpath(); ctx.addPath(p); ctx.fillPath();
-  p = new Path();
-  p.move(new Point(x+13*s,y+8*s)); p.addLine(new Point(x+16*s,y+3*s)); p.addLine(new Point(x+15*s,y+7*s));
-  p.closeSubpath(); ctx.addPath(p); ctx.fillPath();
-  // Eyes
-  ctx.setFillColor(new Color("#1a1a2e"));
-  ctx.fillEllipse(new Rect(x+5*s,y+11*s,2.5*s,2.5*s));
-  ctx.fillEllipse(new Rect(x+11*s,y+11*s,2.5*s,2.5*s));
-  ctx.setFillColor(Color.white());
-  ctx.fillEllipse(new Rect(x+5.8*s,y+11.3*s,1*s,1*s));
-  ctx.fillEllipse(new Rect(x+11.8*s,y+11.3*s,1*s,1*s));
-  // Nose
-  ctx.setFillColor(new Color("#1a1a2e"));
-  ctx.fillEllipse(new Rect(x+7.5*s,y+15*s,3*s,2*s));
-  // Mouth
-  if (happy) {
-    ctx.setFillColor(new Color("#FF7B7B"));
-    ctx.fillEllipse(new Rect(x+8*s,y+17*s,2.5*s,3.5*s));
-  }
-  // Legs
-  ctx.setFillColor(new Color("#E8A832"));
-  ctx.fillRect(new Rect(x+8*s,y+25*s,4*s,6*s));
-  ctx.fillRect(new Rect(x+16*s,y+25*s,4*s,6*s));
-  ctx.fillRect(new Rect(x+24*s,y+25*s,4*s,6*s));
-  ctx.setFillColor(new Color("#FFF5E0"));
-  ctx.fillEllipse(new Rect(x+7.5*s,y+29*s,5*s,2.5*s));
-  ctx.fillEllipse(new Rect(x+15.5*s,y+29*s,5*s,2.5*s));
-  ctx.fillEllipse(new Rect(x+23.5*s,y+29*s,5*s,2.5*s));
-  // Tail
-  ctx.setFillColor(new Color("#D4943A"));
-  const t = new Path();
-  if (happy) {
-    t.move(new Point(x+35*s,y+14*s));
-    t.addCurve(new Point(x+40*s,y+5*s),new Point(x+36*s,y+10*s),new Point(x+42*s,y+6*s));
-    t.addCurve(new Point(x+35*s,y+16*s),new Point(x+39*s,y+7*s),new Point(x+36*s,y+12*s));
-  } else {
-    t.move(new Point(x+35*s,y+20*s));
-    t.addCurve(new Point(x+38*s,y+28*s),new Point(x+36*s,y+24*s),new Point(x+40*s,y+27*s));
-    t.addCurve(new Point(x+35*s,y+22*s),new Point(x+37*s,y+28*s),new Point(x+36*s,y+24*s));
-  }
-  t.closeSubpath(); ctx.addPath(t); ctx.fillPath();
-}
-
-// ── Sparkline ──
-function drawSparkline(ctx, data, x, y, w, h, color, fillAlpha) {
+function drawSparkline(ctx, data, x, y, w, h, color) {
   if (!data || data.length < 2) return;
   const max = Math.max(...data.map(d => d.total), 1);
   const step = w / (data.length - 1);
+  // Gradient fill
   const area = new Path();
   area.move(new Point(x, y + h));
   for (let i = 0; i < data.length; i++)
     area.addLine(new Point(x + i * step, y + h - (data[i].total / max) * h));
   area.addLine(new Point(x + w, y + h));
   area.closeSubpath();
-  ctx.setFillColor(new Color(color, fillAlpha || 0.1));
+  ctx.setFillColor(new Color(color, 0.08));
   ctx.addPath(area); ctx.fillPath();
-  ctx.setStrokeColor(new Color(color));
+  // Line
+  ctx.setStrokeColor(new Color(color, 0.6));
   ctx.setLineWidth(1.5);
   const line = new Path();
   for (let i = 0; i < data.length; i++) {
@@ -517,26 +451,26 @@ function drawSparkline(ctx, data, x, y, w, h, color, fillAlpha) {
     else line.addLine(new Point(px, py));
   }
   ctx.addPath(line); ctx.strokePath();
-  const lx = x + (data.length-1) * step, ly = y + h - (data[data.length-1].total / max) * h;
+  // End dot
+  const lx = x + (data.length - 1) * step;
+  const ly = y + h - (data[data.length - 1].total / max) * h;
   ctx.setFillColor(new Color(color));
-  ctx.fillEllipse(new Rect(lx-2.5, ly-2.5, 5, 5));
+  ctx.fillEllipse(new Rect(lx - 2.5, ly - 2.5, 5, 5));
 }
 
 try {
   const d = await fetchWidget();
+  if (!d || d.error) throw new Error(d?.error || "No data");
   const dark = Device.isUsingDarkAppearance();
 
-  // ── Color palette ──
-  const bg      = dark ? "#0f1117" : "#f5f6fa";
-  const cardBg  = dark ? "#1a1d27" : "#ffffff";
-  const text1   = dark ? "#f0f1f5" : "#1a1d27";
-  const text2   = dark ? "#8b8fa3" : "#6b7280";
-  const border  = dark ? "#2d3148" : "#e2e5eb";
-  const adam     = "#7c6cf0";
-  const aruto    = "#00cec9";
-  const green    = "#10b981";
-  const red      = "#ef4444";
-  const yellow   = "#f59e0b";
+  const bg     = dark ? "#0d0f14" : "#fafafa";
+  const card   = dark ? "#171a23" : "#ffffff";
+  const text1  = dark ? "#e8eaf0" : "#111318";
+  const text2  = dark ? "#5c6178" : "#9096a8";
+  const accent1 = "#7c6cf0";
+  const accent2 = "#00cec9";
+  const green  = "#10b981";
+  const red    = "#ef4444";
 
   const W = 338, H = 155;
   const ctx = new DrawContext();
@@ -544,123 +478,98 @@ try {
   ctx.opaque = false;
   ctx.respectScreenScale = true;
 
-  // Background
+  // BG
   ctx.setFillColor(new Color(bg));
   ctx.fillRect(new Rect(0, 0, W, H));
 
-  // ── ROW 1: Corgi + Title + Pace badge ──
-  drawCorgi(ctx, 8, 1, 0.9, d.under_budget);
-
-  ctx.setFont(Font.boldSystemFont(14));
-  ctx.setTextColor(new Color(text1));
-  ctx.drawTextInRect("Adam + Aruto", new Rect(48, 4, 150, 18));
-  ctx.setFont(Font.mediumSystemFont(10));
-  ctx.setTextColor(new Color(text2));
-  ctx.drawTextInRect("Budget", new Rect(48, 20, 60, 14));
-
-  // Pace pill (top-right)
+  // ── TOP ROW: Big spend number + pace pill ──
   const paceOk = d.under_budget;
   const paceCol = paceOk ? green : red;
-  roundedRect(ctx, W - 68, 5, 56, 22, 11, new Color(paceCol, dark ? 0.2 : 0.12));
-  ctx.setFont(Font.boldSystemFont(12));
-  ctx.setTextColor(new Color(paceCol));
-  ctx.drawTextInRect(d.pace_percent + "%", new Rect(W - 64, 8, 48, 16));
 
-  // ── ROW 2: "This Week" comparison ──
-  const row2Y = 38;
-  ctx.setFont(Font.mediumSystemFont(8));
+  ctx.setFont(Font.systemFont(9));
   ctx.setTextColor(new Color(text2));
-  ctx.drawTextInRect("THIS WEEK", new Rect(12, row2Y, 60, 11));
+  ctx.drawTextInRect("THIS WEEK", new Rect(16, 10, 80, 12));
 
-  // Week change pill
+  ctx.setFont(Font.boldRoundedSystemFont(28));
+  ctx.setTextColor(new Color(text1));
+  ctx.drawTextInRect(fmt(d.this_week_spent), new Rect(16, 22, 180, 34));
+
+  // Week change tag
   const wkCol = d.week_change <= 0 ? green : red;
-  const wkSign = d.week_change >= 0 ? "+" : "";
-  const wkArrow = d.week_change <= 0 ? "\\u2193" : "\\u2191";
-  roundedRect(ctx, 72, row2Y - 1, 46, 13, 6, new Color(wkCol, dark ? 0.2 : 0.12));
-  ctx.setFont(Font.boldSystemFont(8));
+  const wkLabel = (d.week_change <= 0 ? "\\u2193" : "\\u2191") + " " + Math.abs(d.week_change) + "% vs last wk";
+  ctx.setFont(Font.mediumSystemFont(9));
   ctx.setTextColor(new Color(wkCol));
-  ctx.drawTextInRect(wkArrow + wkSign + d.week_change + "%", new Rect(76, row2Y, 40, 11));
+  ctx.drawTextInRect(wkLabel, new Rect(16, 56, 140, 12));
 
-  // Two user cards side-by-side
-  const cardY = row2Y + 15;
-  const cardW = (W - 32) / 2;
-  const cardH = 42;
-
-  for (let i = 0; i < Math.min(d.users.length, 2); i++) {
-    const u = d.users[i];
-    const cx = 12 + i * (cardW + 8);
-    const isAdam = u.name.toLowerCase().includes("adam");
-    const accent = isAdam ? adam : aruto;
-    const ago = timeAgo(u.days_since_last);
-
-    // Card bg
-    roundedRect(ctx, cx, cardY, cardW, cardH, 8, new Color(cardBg));
-    // Subtle top accent line
-    roundedRect(ctx, cx, cardY, cardW, 3, 8, new Color(accent, 0.6));
-
-    // Name
-    ctx.setFont(Font.boldSystemFont(11));
-    ctx.setTextColor(new Color(text1));
-    ctx.drawTextInRect(u.name.split(" ")[0], new Rect(cx + 8, cardY + 7, 60, 14));
-
-    // Week total (prominent)
-    ctx.setFont(Font.boldSystemFont(16));
-    ctx.setTextColor(new Color(accent));
-    ctx.drawTextInRect(fmt(u.week_total), new Rect(cx + 8, cardY + 22, cardW - 16, 18));
-
-    // Last added (top-right)
-    if (ago) {
-      ctx.setFont(Font.systemFont(8));
-      ctx.setTextColor(new Color(text2));
-      ctx.drawTextInRect(ago, new Rect(cx + cardW - 42, cardY + 8, 36, 11));
-    }
-
-    // Txn count (bottom-right)
-    ctx.setFont(Font.systemFont(8));
-    ctx.setTextColor(new Color(text2));
-    ctx.drawTextInRect(u.week_count + " txns", new Rect(cx + cardW - 48, cardY + 28, 42, 11));
-  }
-
-  // ── ROW 3: Sparkline + Progress bar ──
-  const row3Y = cardY + cardH + 6;
-  const sparkW = W * 0.45;
-  const sparkColor = paceOk ? green : red;
-  drawSparkline(ctx, d.daily_breakdown, 12, row3Y, sparkW, 24, sparkColor, dark ? 0.12 : 0.08);
-
-  // Progress bar (right of sparkline)
-  const barX = 12 + sparkW + 12;
-  const barW = W - barX - 12;
-  const barY = row3Y + 4;
-  // Track
-  roundedRect(ctx, barX, barY, barW, 5, 2.5, new Color(border));
-  // Fill
-  const fillPct = Math.min(d.pace_percent, 100) / 100;
-  const barCol = d.pace_percent <= 90 ? green : d.pace_percent <= 100 ? yellow : red;
-  if (fillPct > 0) roundedRect(ctx, barX, barY, barW * fillPct, 5, 2.5, new Color(barCol));
-
-  // Labels under progress bar
+  // Pace pill (top-right)
+  roundedRect(ctx, W - 72, 12, 58, 24, 12, new Color(paceCol, dark ? 0.18 : 0.1));
+  ctx.setFont(Font.boldRoundedSystemFont(13));
+  ctx.setTextColor(new Color(paceCol));
+  ctx.drawTextInRect(d.pace_percent + "%", new Rect(W - 66, 16, 46, 16));
   ctx.setFont(Font.systemFont(7));
   ctx.setTextColor(new Color(text2));
-  ctx.drawTextInRect(fmt(d.month_spent), new Rect(barX, barY + 7, barW / 2, 10));
-  ctx.drawTextInRect(fmt(d.monthly_budget), new Rect(barX + barW / 2, barY + 7, barW / 2, 10));
+  ctx.drawTextInRect("of budget", new Rect(W - 72, 37, 58, 10));
 
-  // ── ROW 4: Bottom stats ──
-  const botY = H - 20;
-  const stats = [
-    { lbl: "Today", val: fmt(d.today_spent), col: text1 },
-    { lbl: "This wk", val: fmt(d.this_week_spent), col: text1 },
-    { lbl: "Last wk", val: fmt(d.last_week_spent), col: text2 },
-    { lbl: "Projected", val: fmt(d.projected_monthly), col: paceOk ? green : red },
-  ];
-  const cW = (W - 24) / stats.length;
-  for (let i = 0; i < stats.length; i++) {
-    const sx = 12 + i * cW;
+  // Sparkline (top-right area, behind pace)
+  drawSparkline(ctx, d.daily_breakdown, W - 150, 50, 136, 22, paceCol);
+
+  // ── DIVIDER ──
+  roundedRect(ctx, 16, 76, W - 32, 0.5, 0.25, new Color(text2, 0.15));
+
+  // ── BOTTOM: Two user columns + stats ──
+  const users = d.users || [];
+  const colW = (W - 44) / 3;
+  const botY = 84;
+
+  for (let i = 0; i < Math.min(users.length, 2); i++) {
+    const u = users[i];
+    const cx = 16 + i * (colW + 6);
+    const isAdam = u.name.toLowerCase().includes("adam");
+    const accent = isAdam ? accent1 : accent2;
+    const ago = timeAgo(u.days_since_last);
+
+    // Accent dot
+    ctx.setFillColor(new Color(accent));
+    ctx.fillEllipse(new Rect(cx, botY + 3, 5, 5));
+
+    // Name
+    ctx.setFont(Font.boldSystemFont(10));
+    ctx.setTextColor(new Color(text1));
+    ctx.drawTextInRect(u.name.split(" ")[0], new Rect(cx + 9, botY, 60, 13));
+
+    // Week total
+    ctx.setFont(Font.boldRoundedSystemFont(18));
+    ctx.setTextColor(new Color(accent));
+    ctx.drawTextInRect(fmt(u.week_total), new Rect(cx, botY + 16, colW, 22));
+
+    // Subtitle
+    ctx.setFont(Font.systemFont(8));
+    ctx.setTextColor(new Color(text2));
+    const sub = u.week_count + " txns" + (ago ? " · " + ago : "");
+    ctx.drawTextInRect(sub, new Rect(cx, botY + 38, colW, 11));
+
+    // Monthly total small
     ctx.setFont(Font.systemFont(7));
     ctx.setTextColor(new Color(text2));
-    ctx.drawTextInRect(stats[i].lbl, new Rect(sx, botY, cW, 9));
-    ctx.setFont(Font.boldSystemFont(10));
-    ctx.setTextColor(new Color(stats[i].col));
-    ctx.drawTextInRect(stats[i].val, new Rect(sx, botY + 9, cW, 12));
+    ctx.drawTextInRect(fmt(u.month_total) + "/mo", new Rect(cx, botY + 50, colW, 10));
+  }
+
+  // ── RIGHT COLUMN: Key stats ──
+  const sx = 16 + 2 * (colW + 6);
+  const statsData = [
+    { lbl: "Today", val: fmt(d.today_spent) },
+    { lbl: "Monthly", val: fmt(d.month_spent) + " / " + fmt(d.monthly_budget) },
+    { lbl: "Projected", val: fmt(d.projected_monthly) },
+    { lbl: "Daily avg", val: fmt(d.daily_average) },
+  ];
+  for (let i = 0; i < statsData.length; i++) {
+    const sy = botY + i * 16;
+    ctx.setFont(Font.systemFont(7));
+    ctx.setTextColor(new Color(text2));
+    ctx.drawTextInRect(statsData[i].lbl, new Rect(sx, sy, colW + 10, 9));
+    ctx.setFont(Font.boldSystemFont(9));
+    ctx.setTextColor(new Color(i === 2 ? paceCol : text1));
+    ctx.drawTextInRect(statsData[i].val, new Rect(sx, sy + 8, colW + 10, 11));
   }
 
   const w = new ListWidget();
@@ -672,8 +581,12 @@ try {
 } catch (e) {
   const w = new ListWidget();
   const dark = Device.isUsingDarkAppearance();
-  w.backgroundColor = new Color(dark ? "#0f1117" : "#f5f6fa");
-  const err = w.addText("Error: " + e.message);
+  w.backgroundColor = new Color(dark ? "#0d0f14" : "#fafafa");
+  const t = w.addText("Budget");
+  t.font = Font.boldRoundedSystemFont(14);
+  t.textColor = new Color(dark ? "#e8eaf0" : "#111318");
+  w.addSpacer(4);
+  const err = w.addText(e.message);
   err.font = Font.systemFont(11);
   err.textColor = new Color("#ef4444");
   if (config.runsInWidget) Script.setWidget(w);
