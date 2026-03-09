@@ -506,33 +506,196 @@ app.put('/api/upcoming-expenses/:id', authMiddleware, asyncHandler(async (req, r
   res.json({ message: 'Updated' });
 }));
 
+// ===================== RETENTION PROFILES =====================
+
+app.get('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const userId = parseInt(req.params.userId);
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [userId])).rows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  let profile = (await db.query('SELECT * FROM retention_profiles WHERE user_id = $1', [userId])).rows[0];
+  if (!profile) {
+    profile = { retention_method: 'auto', fixed_amount: 0, lookback_weeks: 8, buffer_percent: 10, expense_source: 'all' };
+  }
+
+  if (profile.retention_method === 'fixed' && profile.fixed_amount > 0) {
+    return res.json({
+      user_id: userId,
+      retention_method: 'fixed',
+      calculated_retention: profile.fixed_amount,
+      avg_per_period: profile.fixed_amount,
+      buffer_amount: 0,
+      upcoming_extra: 0,
+      lookback_weeks: profile.lookback_weeks,
+      pay_period: user.pay_cycle,
+      by_category: {},
+      profile
+    });
+  }
+
+  // Auto-calculate from expense history
+  const lookbackDays = profile.lookback_weeks * 7;
+  const lookbackStart = clampDate(new Date(Date.now() - lookbackDays * 86400000).toISOString().split('T')[0]);
+
+  const expenses = (await db.query(
+    'SELECT category, SUM(amount) as total FROM expenses WHERE user_id = $1 AND expense_date >= $2 GROUP BY category',
+    [userId, lookbackStart]
+  )).rows;
+
+  const totalExpenses = expenses.reduce((s, e) => s + parseFloat(e.total), 0);
+  const periodsPerYear = user.pay_cycle === 'weekly' ? 52 : user.pay_cycle === 'fortnightly' ? 26 : 12;
+  const weeksPerPeriod = 52 / periodsPerYear;
+  const periodsInLookback = (profile.lookback_weeks / weeksPerPeriod);
+  const avgPerPeriod = periodsInLookback > 0 ? totalExpenses / periodsInLookback : 0;
+  const bufferAmount = avgPerPeriod * (profile.buffer_percent / 100);
+
+  // Factor in upcoming expenses within next pay period
+  const nextPayDays = Math.ceil(weeksPerPeriod * 7);
+  const nextPayDate = new Date(Date.now() + nextPayDays * 86400000).toISOString().split('T')[0];
+  const upcomingRows = (await db.query(
+    'SELECT SUM(estimated_amount) as total FROM upcoming_expenses WHERE user_id = $1 AND resolved = 0 AND expected_date <= $2',
+    [userId, nextPayDate]
+  )).rows[0];
+  const upcomingExtra = parseFloat(upcomingRows?.total) || 0;
+
+  const byCategory = {};
+  expenses.forEach(e => { byCategory[e.category] = Math.round(parseFloat(e.total) / periodsInLookback); });
+
+  const calculatedRetention = avgPerPeriod + bufferAmount + upcomingExtra;
+
+  res.json({
+    user_id: userId,
+    retention_method: 'auto',
+    calculated_retention: Math.round(calculatedRetention * 100) / 100,
+    avg_per_period: Math.round(avgPerPeriod * 100) / 100,
+    buffer_amount: Math.round(bufferAmount * 100) / 100,
+    upcoming_extra: upcomingExtra,
+    lookback_weeks: profile.lookback_weeks,
+    expense_count: expenses.length,
+    pay_period: user.pay_cycle,
+    by_category: byCategory,
+    profile
+  });
+}));
+
+app.put('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const userId = parseInt(req.params.userId);
+  const { retention_method, fixed_amount, lookback_weeks, buffer_percent, expense_source } = req.body;
+
+  const existing = (await db.query('SELECT id FROM retention_profiles WHERE user_id = $1', [userId])).rows[0];
+  if (existing) {
+    await db.query(
+      'UPDATE retention_profiles SET retention_method = COALESCE($1, retention_method), fixed_amount = COALESCE($2, fixed_amount), lookback_weeks = COALESCE($3, lookback_weeks), buffer_percent = COALESCE($4, buffer_percent), expense_source = COALESCE($5, expense_source), updated_at = NOW() WHERE user_id = $6',
+      [retention_method, fixed_amount, lookback_weeks, buffer_percent, expense_source, userId]
+    );
+  } else {
+    await db.query(
+      'INSERT INTO retention_profiles (user_id, retention_method, fixed_amount, lookback_weeks, buffer_percent, expense_source) VALUES ($1, $2, $3, $4, $5, $6)',
+      [userId, retention_method || 'auto', fixed_amount || 0, lookback_weeks || 8, buffer_percent || 10, expense_source || 'all']
+    );
+  }
+  const profile = (await db.query('SELECT * FROM retention_profiles WHERE user_id = $1', [userId])).rows[0];
+  res.json(profile);
+}));
+
+// ===================== PAYDAY COMPLETE (offset-centric) =====================
+
+app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) => {
+  const { net_amount, gross_amount, pay_date, pay_type, notes, retention_amount, offset_amount, goal_allocations } = req.body;
+  const db = await getDb();
+  const client = await db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Record income entry
+    const incomeResult = await client.query(
+      'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [req.user.id, gross_amount || net_amount, net_amount, pay_date, pay_type || 'regular', notes || null, retention_amount, offset_amount]
+    );
+    const incomeEntry = incomeResult.rows[0];
+
+    // 2. Record offset allocation
+    if (offset_amount > 0) {
+      await client.query(
+        'INSERT INTO fund_allocations (user_id, income_entry_id, target_account, amount, allocated_date, notes) VALUES ($1, $2, $3, $4, $5, $6)',
+        [req.user.id, incomeEntry.id, 'offset', offset_amount, pay_date, 'Offset transfer (surplus after retention)']
+      );
+
+      // Update offset balance
+      const existing = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+      const newBalance = (existing ? existing.balance : 0) + offset_amount;
+      await client.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [newBalance, req.user.id]);
+    }
+
+    // 3. Process goal allocations (virtual buckets within offset)
+    if (goal_allocations && goal_allocations.length > 0) {
+      for (const ga of goal_allocations) {
+        if (ga.amount > 0) {
+          await client.query(
+            'INSERT INTO goal_contributions (goal_id, user_id, amount, income_entry_id, notes) VALUES ($1, $2, $3, $4, $5)',
+            [ga.goal_id, req.user.id, ga.amount, incomeEntry.id, ga.notes || 'PayDay contribution']
+          );
+          await client.query(
+            'UPDATE savings_goals SET current_amount = current_amount + $1 WHERE id = $2',
+            [ga.amount, ga.goal_id]
+          );
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Fetch updated data
+    const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+
+    res.json({
+      income_entry: incomeEntry,
+      offset_balance: offsetRow?.balance || 0,
+      goals,
+      message: `Pay recorded. $${offset_amount.toFixed(2)} sent to offset.`
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
+// ===================== GOAL CONTRIBUTIONS =====================
+
+app.get('/api/goal-contributions/:goalId', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { rows } = await db.query(
+    'SELECT gc.*, u.display_name as user_name FROM goal_contributions gc JOIN users u ON gc.user_id = u.id WHERE gc.goal_id = $1 ORDER BY gc.contributed_at DESC',
+    [req.params.goalId]
+  );
+  res.json(rows);
+}));
+
 // ===================== CLAUDE AI ROUTES =====================
 
 app.post('/api/claude/payday-advice', authMiddleware, asyncHandler(async (req, res) => {
-  const { net_pay, upcoming_expenses_override } = req.body;
+  const { net_pay, retention_data } = req.body;
   const db = await getDb();
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
 
-  // Get account balances
-  const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-  const accountBalances = {};
-  for (const acct of accounts) {
-    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
-    accountBalances[acct] = row ? row.balance : 0;
-  }
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  const offsetBalance = offsetRow ? offsetRow.balance : 0;
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
-  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
   const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
   const recentExpenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1 ORDER BY expense_date DESC', [twoWeeksAgo])).rows;
-  const upcomingExpenses = upcoming_expenses_override ||
-    (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
+  const upcomingExpenses = (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
   try {
     const result = await getPayDayAdvice({
-      user, netPay: net_pay, accountBalances, goals, levers, recentExpenses, upcomingExpenses
+      user, netPay: net_pay, retentionData: retention_data, offsetBalance, goals, recentExpenses, upcomingExpenses
     });
-    // Store advice
     await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
       ['payday', result.advice, JSON.stringify({ net_pay, user_id: req.user.id })]
     );
@@ -547,12 +710,8 @@ app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, r
   const db = await getDb();
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
 
-  const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-  const accountBalances = {};
-  for (const acct of accounts) {
-    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
-    accountBalances[acct] = row ? row.balance : 0;
-  }
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  const offsetBalance = offsetRow ? offsetRow.balance : 0;
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
   const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
@@ -565,7 +724,7 @@ app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, r
 
   try {
     const result = await getAccountSweepAdvice({
-      user, transactionBalance: transaction_balance, accountBalances, goals, levers, recentExpenses, upcomingExpenses, budgets, budgetScale
+      user, transactionBalance: transaction_balance, offsetBalance, goals, recentExpenses, upcomingExpenses, budgets, budgetScale
     });
     await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
       ['account-sweep', result.advice, JSON.stringify({ transaction_balance, user_id: req.user.id })]
@@ -753,19 +912,14 @@ app.post('/api/claude/nightly-summary', authMiddleware, asyncHandler(async (req,
   const expenses = (await db.query('SELECT * FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows;
   const incomes = (await db.query('SELECT * FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows;
 
-  const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-  const accountBalances = {};
-  for (const acct of accounts) {
-    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
-    accountBalances[acct] = row ? row.balance : 0;
-  }
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  const offsetBalance = offsetRow ? offsetRow.balance : 0;
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
-  const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
 
   try {
     const result = await getNightlySummary({
-      expenses, incomes, accountBalances, goals, levers, period: `${thirtyDaysAgo} to ${today}`
+      expenses, incomes, offsetBalance, goals, period: `${thirtyDaysAgo} to ${today}`
     });
     await db.query('INSERT INTO claude_advice (advice_type, content) VALUES ($1, $2)', ['nightly', result.summary]);
     res.json(result);
@@ -1057,7 +1211,9 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
   }
   const estimatedMonthlyIncome = totalAnnualNet / 12;
-  const mortgage = 4587.83;
+  const mortgage = 4656.64;
+  // Offset-centric: mortgage debited from offset by bank, not subtracted from surplus
+  const monthlySurplus = estimatedMonthlyIncome - (parseFloat(monthlyExpenses.total) || 0);
 
   res.json({
     monthly_expenses: parseFloat(monthlyExpenses.total) || 0,
@@ -1071,6 +1227,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     users,
     mortgage_monthly: mortgage,
     estimated_monthly_income: Math.round(estimatedMonthlyIncome),
+    monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
     weekly_budget: Math.round(weeklyBudget),
     budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) }))
@@ -1200,15 +1357,12 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
 
   const monthlyNetIncome = totalAnnualNet / 12;
   const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
-  const mortgage = 4587.83;
-  const monthlySurplus = monthlyNetIncome - monthlyExpenseAvg - mortgage;
+  const mortgage = 4656.64;
+  // Offset-centric: mortgage is auto-debited from offset by bank, NOT subtracted from surplus
+  const monthlySurplus = monthlyNetIncome - monthlyExpenseAvg;
 
-  const accounts = ['offset', 'savings', 'credit_card', 'investment'];
-  const balances = {};
-  for (const acct of accounts) {
-    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
-    balances[acct] = row ? row.balance : 0;
-  }
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  const offsetBalance = offsetRow ? offsetRow.balance : 0;
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
   const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
@@ -1217,34 +1371,37 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
-  const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget - mortgage;
+  const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget;
 
-  // Project 12 months using budgeted surplus (the plan)
+  // Project 12 months — all surplus goes to offset (minus mortgage auto-debit)
   const projections = [];
-  let runningOffset = balances.offset;
-  let runningSavings = balances.savings;
-  let runningInvestment = balances.investment;
-
-  const offsetPct = (levers.find(l => l.name.includes('Offset'))?.value || 50) / 100;
-  const savingsPct = (levers.find(l => l.name.includes('Savings') && l.name.includes('%'))?.value || 30) / 100;
-  const investPct = (levers.find(l => l.name.includes('Investment'))?.value || 10) / 100;
+  let runningOffset = offsetBalance;
+  const netOffsetGrowth = Math.max(0, budgetedSurplus) - mortgage; // surplus in, mortgage out
 
   for (let m = 1; m <= 12; m++) {
     const date = new Date();
     date.setMonth(date.getMonth() + m);
-    const surplus = Math.max(0, budgetedSurplus);
-    runningOffset += surplus * offsetPct;
-    runningSavings += surplus * savingsPct;
-    runningInvestment += surplus * investPct;
+    runningOffset += netOffsetGrowth;
+    // Interest saved calculation
+    const mortgageRate = 0.062;
+    const monthlyInterestSaved = (runningOffset * mortgageRate) / 12;
     projections.push({
       month: date.toISOString().substring(0, 7),
       offset: Math.round(runningOffset),
-      savings: Math.round(runningSavings),
-      investment: Math.round(runningInvestment),
-      surplus: Math.round(surplus),
-      total_net_worth: Math.round(runningOffset + runningSavings + runningInvestment)
+      surplus_added: Math.round(Math.max(0, budgetedSurplus)),
+      mortgage_debited: Math.round(mortgage),
+      net_growth: Math.round(netOffsetGrowth),
+      interest_saved: Math.round(monthlyInterestSaved),
     });
   }
+
+  // Goal achievement forecast
+  const goalForecasts = goals.map(g => {
+    const remaining = g.target_amount - g.current_amount;
+    const monthlyContrib = Math.max(0, budgetedSurplus) * 0.1; // rough estimate: 10% of surplus per goal
+    const monthsToGoal = monthlyContrib > 0 ? Math.ceil(remaining / monthlyContrib) : null;
+    return { ...g, months_to_goal: monthsToGoal };
+  });
 
   // Sydney benchmarks
   const sydneyBenchmarks = {
@@ -1263,10 +1420,10 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
 
   const status = monthlySurplus > 500 ? 'great' : monthlySurplus > 0 ? 'okay' : 'warning';
   const message = monthlySurplus > 500
-    ? `You're saving ~$${Math.round(monthlySurplus)}/month after mortgage. Keep it up!`
+    ? `You're adding ~$${Math.round(monthlySurplus)}/month to offset. Every dollar saves ${(0.062 * 100).toFixed(1)}% in mortgage interest!`
     : monthlySurplus > 0
-    ? `Tight but positive: ~$${Math.round(monthlySurplus)}/month surplus. Look for ways to increase this.`
-    : `Warning: spending exceeds income by ~$${Math.round(Math.abs(monthlySurplus))}/month. Immediate action needed.`;
+    ? `Positive surplus of ~$${Math.round(monthlySurplus)}/month going to offset. Look for ways to grow it.`
+    : `Warning: spending exceeds income by ~$${Math.round(Math.abs(monthlySurplus))}/month. Offset balance will shrink.`;
 
   res.json({
     monthly_net_income: Math.round(monthlyNetIncome),
@@ -1275,9 +1432,10 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
     budgeted_surplus: Math.round(budgetedSurplus),
+    net_offset_growth: Math.round(netOffsetGrowth),
     projections,
-    balances,
-    goals,
+    offset_balance: offsetBalance,
+    goals: goalForecasts,
     benchmarks: sydneyBenchmarks,
     status,
     message

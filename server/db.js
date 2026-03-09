@@ -158,7 +158,35 @@ async function initSchema() {
       created_by INTEGER REFERENCES users(id),
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS retention_profiles (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) UNIQUE,
+      retention_method TEXT NOT NULL DEFAULT 'auto',
+      fixed_amount REAL DEFAULT 0,
+      lookback_weeks INTEGER NOT NULL DEFAULT 8,
+      buffer_percent REAL NOT NULL DEFAULT 10,
+      expense_source TEXT NOT NULL DEFAULT 'all',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS goal_contributions (
+      id SERIAL PRIMARY KEY,
+      goal_id INTEGER NOT NULL REFERENCES savings_goals(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount REAL NOT NULL,
+      income_entry_id INTEGER REFERENCES income_entries(id),
+      notes TEXT,
+      contributed_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
+
+  // Add offset-centric columns if missing
+  try {
+    await pool.query('ALTER TABLE savings_goals ADD COLUMN IF NOT EXISTS is_offset_bucket INTEGER NOT NULL DEFAULT 1');
+    await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS retention_amount REAL');
+    await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS offset_transfer REAL');
+  } catch (e) { /* columns may already exist */ }
 
   // Log existing data counts for diagnostics
   const userCount = (await pool.query('SELECT COUNT(*) as count FROM users')).rows[0].count;
@@ -195,6 +223,21 @@ async function initSchema() {
       await pool.query(insertLever, ['Investment %', 'Percentage of surplus allocated to investments', 'percentage', 10, user1Id]);
       await pool.query(insertLever, ['Budget Scale %', 'Scale all category budgets (100 = conservative base, 120 = 20% more spending room, 80 = tighter)', 'percentage', 100, user1Id]);
       console.log('Default levers seeded');
+
+      // Seed retention profiles
+      const user2Res = await pool.query('SELECT id FROM users WHERE username = $1', ['aruto']);
+      const user2Id = user2Res.rows[0]?.id;
+      await pool.query(
+        'INSERT INTO retention_profiles (user_id, retention_method, lookback_weeks, buffer_percent, expense_source) VALUES ($1, $2, $3, $4, $5)',
+        [user1Id, 'auto', 8, 10, 'credit_card']
+      );
+      if (user2Id) {
+        await pool.query(
+          'INSERT INTO retention_profiles (user_id, retention_method, lookback_weeks, buffer_percent, expense_source) VALUES ($1, $2, $3, $4, $5)',
+          [user2Id, 'auto', 8, 10, 'direct']
+        );
+      }
+      console.log('Default retention profiles seeded');
     }
     console.log('Default users seeded: adam, aruto');
   }
@@ -213,6 +256,22 @@ async function initSchema() {
   // Migrate Pets → Other (category removed)
   await pool.query("UPDATE expenses SET category = 'Other' WHERE category = 'Pets'");
   await pool.query("DELETE FROM category_budgets WHERE category = 'Pets'");
+
+  // Deactivate old percentage levers (offset-centric model)
+  await pool.query("UPDATE levers SET active = 0 WHERE name IN ('Offset Account %', 'Savings %', 'Investment %') AND active = 1");
+
+  // Ensure retention profiles exist for all users
+  const allUsers = (await pool.query('SELECT id, username FROM users')).rows;
+  for (const u of allUsers) {
+    const exists = (await pool.query('SELECT id FROM retention_profiles WHERE user_id = $1', [u.id])).rows[0];
+    if (!exists) {
+      const src = u.username === 'aruto' ? 'direct' : 'credit_card';
+      await pool.query(
+        'INSERT INTO retention_profiles (user_id, retention_method, lookback_weeks, buffer_percent, expense_source) VALUES ($1, $2, $3, $4, $5)',
+        [u.id, 'auto', 8, 10, src]
+      );
+    }
+  }
 }
 
 async function seedCategoryBudgets() {

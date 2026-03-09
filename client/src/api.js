@@ -80,6 +80,16 @@ export const getUpcomingExpenses = () => apiFetch('/api/upcoming-expenses');
 export const addUpcomingExpense = (data) => apiFetch('/api/upcoming-expenses', { method: 'POST', body: JSON.stringify(data) });
 export const resolveUpcomingExpense = (id) => apiFetch(`/api/upcoming-expenses/${id}`, { method: 'PUT', body: JSON.stringify({ resolved: true }) });
 
+// Retention Profiles
+export const getRetention = (userId) => apiFetch(`/api/retention/${userId}`);
+export const updateRetention = (userId, data) => apiFetch(`/api/retention/${userId}`, { method: 'PUT', body: JSON.stringify(data) });
+
+// PayDay Complete (offset-centric)
+export const completePayDay = (data) => apiFetch('/api/payday/complete', { method: 'POST', body: JSON.stringify(data) });
+
+// Goal Contributions
+export const getGoalContributions = (goalId) => apiFetch(`/api/goal-contributions/${goalId}`);
+
 // Claude AI
 export const getPayDayAdvice = (data) => apiFetch('/api/claude/payday-advice', { method: 'POST', body: JSON.stringify(data) });
 export const getAccountSweepAdvice = (data) => apiFetch('/api/claude/account-sweep', { method: 'POST', body: JSON.stringify(data) });

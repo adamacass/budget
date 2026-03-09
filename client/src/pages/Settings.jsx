@@ -193,14 +193,14 @@ export default function Settings() {
 
       {tab === 'accounts' && (
         <div className="card">
-          <div className="card-title">Manual Balance Corrections</div>
+          <div className="card-title">Account Balances</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-            Update account balances manually to match your actual bank statements.
+            Update your offset balance to match your actual bank statement. This is the primary account — all surplus flows here.
           </p>
           {['offset', 'savings', 'credit_card', 'investment'].map(acct => (
-            <div key={acct} style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem' }}>
-              <div style={{ width: 150, fontWeight: 600, fontSize: '0.9rem', textTransform: 'capitalize' }}>
-                {acct.replace('_', ' ')}
+            <div key={acct} style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem', opacity: acct === 'offset' ? 1 : 0.6 }}>
+              <div style={{ width: 150, fontWeight: acct === 'offset' ? 700 : 500, fontSize: '0.9rem', textTransform: 'capitalize' }}>
+                {acct === 'offset' ? 'Offset (Primary)' : acct.replace('_', ' ')}
               </div>
               <input className="form-input" type="number" step="0.01" style={{ width: 200 }}
                 value={balances[acct] || ''}
