@@ -188,17 +188,69 @@ async function initSchema() {
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS offset_transfer REAL');
   } catch (e) { /* columns may already exist */ }
 
-  // Update offset balance to latest known value if it's still at old seed value
+  // Fix Aruto's gross income (was 70000, should be 95000 → ~$1,220/wk net)
+  try {
+    await pool.query("UPDATE users SET gross_income = 95000 WHERE username = 'aruto' AND gross_income = 70000");
+  } catch (e) { /* ignore */ }
+
+  // Update offset balance to latest known value if it was mangled by auto-mortgage
   try {
     const offsetRow = (await pool.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-    if (offsetRow && offsetRow.balance === 57000) {
+    const currentBal = offsetRow ? offsetRow.balance : 0;
+    // If balance dropped below $58k due to erroneous auto-debit, restore it
+    if (currentBal < 58000 && currentBal > 0) {
       const admin = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
       if (admin) {
         await pool.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', 58236.51, $1)", [admin.id]);
-        console.log('Updated offset balance from $57,000 to $58,236.51');
+        console.log(`Restored offset balance from $${currentBal} to $58,236.51`);
       }
     }
   } catch (e) { /* ignore */ }
+
+  // Seed historical income entries (Aruto $450/wk to offset, Adam fortnightly)
+  try {
+    const existingIncome = (await pool.query('SELECT COUNT(*) as cnt FROM income_entries')).rows[0];
+    if (parseInt(existingIncome.cnt) === 0) {
+      const adamRow = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+      const arutoRow = (await pool.query("SELECT id FROM users WHERE username = 'aruto'")).rows[0];
+      if (adamRow && arutoRow) {
+        // Aruto: ~$1,220/wk net, retains $770, sends $450 to offset — weekly since Jan 2026
+        const arutoWeeklyNet = 1220;
+        const arutoRetention = 770;
+        const arutoOffset = 450;
+        // Adam: ~$3,914 fortnightly net, retains ~$1,400, sends ~$2,514 to offset
+        const adamFnNet = 3914;
+        const adamRetention = 1400;
+        const adamOffset = 2514;
+
+        const startDate = new Date('2026-01-06'); // First Monday after data start
+        const today = new Date();
+
+        // Aruto's weekly entries
+        let d = new Date(startDate);
+        while (d <= today) {
+          const dateStr = d.toISOString().split('T')[0];
+          await pool.query(
+            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [arutoRow.id, arutoWeeklyNet, arutoWeeklyNet, dateStr, 'regular', arutoRetention, arutoOffset]
+          );
+          d.setDate(d.getDate() + 7);
+        }
+
+        // Adam's fortnightly entries
+        d = new Date(startDate);
+        while (d <= today) {
+          const dateStr = d.toISOString().split('T')[0];
+          await pool.query(
+            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [adamRow.id, adamFnNet, adamFnNet, dateStr, 'regular', adamRetention, adamOffset]
+          );
+          d.setDate(d.getDate() + 14);
+        }
+        console.log('Historical income entries seeded for Adam and Aruto');
+      }
+    }
+  } catch (e) { console.error('Income seed error:', e.message); }
 
   // Log existing data counts for diagnostics
   const userCount = (await pool.query('SELECT COUNT(*) as count FROM users')).rows[0].count;
@@ -217,7 +269,7 @@ async function initSchema() {
     );
     await pool.query(
       'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      ['aruto', 'Aruto', hash2, 'partner', 70000, 0.115, 0.04, 'weekly']
+      ['aruto', 'Aruto', hash2, 'partner', 95000, 0.115, 0.04, 'weekly']
     );
 
     const user1Res = await pool.query('SELECT id FROM users WHERE username = $1', ['adam']);

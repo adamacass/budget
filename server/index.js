@@ -809,39 +809,28 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
 // ===================== AUTO-MORTGAGE DEBIT =====================
 
 // Apply pending mortgage debits to offset balance (runs on dashboard load)
+// IMPORTANT: The stored offset balance ($58,236.51) ALREADY reflects all past mortgage debits.
+// This function only creates record markers for the chart — it NEVER deducts from balance
+// for historical months. Only future 23rds (after the feature was enabled) will deduct.
 async function applyPendingMortgageDebits(db) {
   const mortgage = 4656.64;
   const today = new Date();
 
-  // Check if we've initialized past mortgage records
-  // The current balance ($58,236.51) ALREADY reflects all past mortgage debits,
-  // so we only seed records (not deduct) for past months, and only deduct going forward
-  const anyExisting = (await db.query(
-    "SELECT COUNT(*) as cnt FROM fund_allocations WHERE target_account = 'offset' AND notes LIKE 'Mortgage%'"
-  )).rows[0];
-
   const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
   const userId = admin?.id || 1;
 
-  if (parseInt(anyExisting.cnt) === 0) {
-    // First run: seed all past 23rds as "already applied" (balance already reflects them)
-    for (let y = 2026; y <= today.getFullYear(); y++) {
-      for (let m = 0; m < 12; m++) {
-        const debitDate = new Date(y, m, 23);
-        if (debitDate > today) break;
-        const dateStr = debitDate.toISOString().split('T')[0];
-        if (dateStr < '2026-01-01') continue;
-        await db.query(
-          "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit (historical)')",
-          [userId, -mortgage, dateStr]
-        );
-      }
-    }
-    return 0; // No balance adjustments — already reflected
+  // Clean up any erroneous debits from the old buggy auto-debit that subtracted balance
+  const badDebits = (await db.query(
+    "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit'"
+  )).rows;
+  if (badDebits.length > 0) {
+    await db.query("DELETE FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit'");
+    // Restore offset balance
+    await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', 58236.51, $1)", [userId]);
+    console.log(`Cleaned up ${badDebits.length} erroneous mortgage debits, restored offset to $58,236.51`);
   }
 
-  // Subsequent runs: only apply NEW mortgage debits (23rds that have passed since last check)
-  const debitsToApply = [];
+  // Ensure all past 23rds have a historical marker (for chart display only — no balance deduction)
   for (let y = 2026; y <= today.getFullYear(); y++) {
     for (let m = 0; m < 12; m++) {
       const debitDate = new Date(y, m, 23);
@@ -855,24 +844,15 @@ async function applyPendingMortgageDebits(db) {
       )).rows[0];
 
       if (!existing) {
-        debitsToApply.push(dateStr);
+        await db.query(
+          "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit (historical)')",
+          [userId, -mortgage, dateStr]
+        );
       }
     }
   }
 
-  for (const dateStr of debitsToApply) {
-    await db.query(
-      "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
-      [userId, -mortgage, dateStr]
-    );
-    // Deduct from offset balance
-    const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-    const currentBal = offsetRow ? offsetRow.balance : 0;
-    await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)",
-      [currentBal - mortgage, userId]);
-  }
-
-  return debitsToApply.length;
+  return 0;
 }
 
 // ===================== CLAUDE AI ROUTES =====================
