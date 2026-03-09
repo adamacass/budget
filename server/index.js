@@ -677,6 +677,141 @@ app.get('/api/goal-contributions/:goalId', authMiddleware, asyncHandler(async (r
   res.json(rows);
 }));
 
+// ===================== PAYDAY EVENTS (for chart overlays) =====================
+
+app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { days } = req.query;
+  const numDays = Math.min(Math.max(parseInt(days) || 14, 7), 365);
+  const startDate = new Date(Date.now() - numDays * 86400000).toISOString().split('T')[0];
+  const endDate = new Date().toISOString().split('T')[0];
+
+  // Get income entries with offset transfers in range
+  const incomeRows = (await db.query(
+    `SELECT ie.id, ie.user_id, ie.amount, ie.net_amount, ie.pay_date, ie.pay_type,
+            ie.retention_amount, ie.offset_transfer, u.display_name as user_name
+     FROM income_entries ie
+     JOIN users u ON ie.user_id = u.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2
+     ORDER BY ie.pay_date ASC`,
+    [startDate, endDate]
+  )).rows;
+
+  // Get goal contributions for these income entries
+  const incomeIds = incomeRows.map(r => r.id);
+  let goalContribs = [];
+  if (incomeIds.length > 0) {
+    goalContribs = (await db.query(
+      `SELECT gc.income_entry_id, gc.amount, gc.goal_id, sg.name as goal_name
+       FROM goal_contributions gc
+       JOIN savings_goals sg ON gc.goal_id = sg.id
+       WHERE gc.income_entry_id = ANY($1)`,
+      [incomeIds]
+    )).rows;
+  }
+
+  // Get mortgage debit dates (23rd of each month in range)
+  const mortgage = 4656.64;
+  const mortgageEvents = [];
+  const start = new Date(startDate + 'T00:00:00');
+  const end = new Date(endDate + 'T00:00:00');
+  const cursor = new Date(start.getFullYear(), start.getMonth(), 23);
+  if (cursor < start) cursor.setMonth(cursor.getMonth() + 1);
+  while (cursor <= end) {
+    mortgageEvents.push({
+      date: cursor.toISOString().split('T')[0],
+      amount: mortgage,
+      type: 'mortgage_debit'
+    });
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  // Combine into events by date
+  const events = {};
+
+  for (const ie of incomeRows) {
+    if (!events[ie.pay_date]) events[ie.pay_date] = { date: ie.pay_date, paydays: [], mortgage_debit: null };
+    const contribs = goalContribs.filter(gc => gc.income_entry_id === ie.id);
+    events[ie.pay_date].paydays.push({
+      user_name: ie.user_name,
+      net_pay: ie.net_amount || ie.amount,
+      offset_transfer: ie.offset_transfer || 0,
+      retention: ie.retention_amount || 0,
+      goal_allocations: contribs.map(gc => ({ goal_name: gc.goal_name, amount: gc.amount }))
+    });
+  }
+
+  for (const me of mortgageEvents) {
+    if (!events[me.date]) events[me.date] = { date: me.date, paydays: [], mortgage_debit: null };
+    events[me.date].mortgage_debit = me.amount;
+  }
+
+  res.json({
+    events: Object.values(events).sort((a, b) => a.date.localeCompare(b.date)),
+    mortgage_monthly: mortgage
+  });
+}));
+
+// ===================== AUTO-MORTGAGE DEBIT =====================
+
+// Apply pending mortgage debits to offset balance (runs on dashboard load)
+async function applyPendingMortgageDebits(db) {
+  const mortgage = 4656.64;
+  const today = new Date();
+
+  // Check last recorded mortgage debit
+  const lastDebit = (await db.query(
+    "SELECT allocated_date FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit' ORDER BY allocated_date DESC LIMIT 1"
+  )).rows[0];
+
+  const debitsToApply = [];
+
+  // Find all 23rds from DATA_START_DATE to today that haven't been debited
+  const startYear = 2026;
+  const startMonth = 0; // January
+
+  for (let y = startYear; y <= today.getFullYear(); y++) {
+    for (let m = (y === startYear ? startMonth : 0); m < 12; m++) {
+      const debitDate = new Date(y, m, 23);
+      if (debitDate > today) break;
+      const dateStr = debitDate.toISOString().split('T')[0];
+      if (dateStr < '2026-01-01') continue;
+
+      // Check if this debit was already recorded
+      const existing = (await db.query(
+        "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit' AND allocated_date = $1",
+        [dateStr]
+      )).rows[0];
+
+      if (!existing) {
+        debitsToApply.push(dateStr);
+      }
+    }
+  }
+
+  if (debitsToApply.length > 0) {
+    // Get admin user for updated_by
+    const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+    const userId = admin?.id || 1;
+
+    for (const dateStr of debitsToApply) {
+      // Record the debit allocation
+      await db.query(
+        "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
+        [userId, -mortgage, dateStr]
+      );
+
+      // Deduct from offset balance
+      const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+      const currentBal = offsetRow ? offsetRow.balance : 0;
+      await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)",
+        [currentBal - mortgage, userId]);
+    }
+  }
+
+  return debitsToApply.length;
+}
+
 // ===================== CLAUDE AI ROUTES =====================
 
 app.post('/api/claude/payday-advice', authMiddleware, asyncHandler(async (req, res) => {
@@ -1066,12 +1201,64 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const dailyAvg = (parseFloat(totalMonth.total) || 0) / daysElapsed;
 
   // Daily spending (last 14 days, clamped to DATA_START_DATE)
+  const fourteenAgo = clampDate(new Date(Date.now() - 13 * 86400000).toISOString().split('T')[0]);
   const dailySpending = [];
+
+  // Fetch payday events for this range
+  const payEventsRaw = (await db.query(
+    `SELECT ie.pay_date, ie.offset_transfer, ie.retention_amount, ie.net_amount, ie.amount, u.display_name as user_name
+     FROM income_entries ie JOIN users u ON ie.user_id = u.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2`,
+    [fourteenAgo, today]
+  )).rows;
+  const goalContribsRaw = (await db.query(
+    `SELECT gc.income_entry_id, gc.amount, sg.name as goal_name, ie.pay_date
+     FROM goal_contributions gc
+     JOIN savings_goals sg ON gc.goal_id = sg.id
+     JOIN income_entries ie ON gc.income_entry_id = ie.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2`,
+    [fourteenAgo, today]
+  )).rows;
+
+  // Mortgage events (23rd of month)
+  const mortgage14 = 4656.64;
+  const mortgageDates = new Set();
+  {
+    const s = new Date(fourteenAgo + 'T00:00:00');
+    const e = new Date(today + 'T00:00:00');
+    const c = new Date(s.getFullYear(), s.getMonth(), 23);
+    if (c < s) c.setMonth(c.getMonth() + 1);
+    while (c <= e) {
+      mortgageDates.add(c.toISOString().split('T')[0]);
+      c.setMonth(c.getMonth() + 1);
+    }
+  }
+
   for (let d = 13; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
     if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
-    dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
+    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) };
+
+    // Attach payday events
+    const dayPayEvents = payEventsRaw.filter(pe => pe.pay_date === date);
+    if (dayPayEvents.length > 0) {
+      dayData.payday = dayPayEvents.map(pe => ({
+        user_name: pe.user_name,
+        net_pay: pe.net_amount || pe.amount,
+        offset_transfer: pe.offset_transfer || 0,
+        retention: pe.retention_amount || 0,
+        goals: goalContribsRaw.filter(gc => gc.pay_date === date).map(gc => ({ name: gc.goal_name, amount: gc.amount }))
+      }));
+      dayData.total_offset_transfer = dayPayEvents.reduce((s, pe) => s + (pe.offset_transfer || 0), 0);
+    }
+
+    // Attach mortgage events
+    if (mortgageDates.has(date)) {
+      dayData.mortgage_debit = mortgage14;
+    }
+
+    dailySpending.push(dayData);
   }
 
   // Top 5 biggest expenses this month
@@ -1125,16 +1312,64 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
   const db = await getDb();
   const { days } = req.query;
   const numDays = Math.min(Math.max(parseInt(days) || 14, 7), 365);
+  const today = new Date().toISOString().split('T')[0];
+  const startDate = clampDate(new Date(Date.now() - (numDays - 1) * 86400000).toISOString().split('T')[0]);
+
+  // Fetch payday events for range
+  const payEventsRaw = (await db.query(
+    `SELECT ie.pay_date, ie.offset_transfer, ie.retention_amount, ie.net_amount, ie.amount, u.display_name as user_name
+     FROM income_entries ie JOIN users u ON ie.user_id = u.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2`,
+    [startDate, today]
+  )).rows;
+  const goalContribsRaw = (await db.query(
+    `SELECT gc.amount, sg.name as goal_name, ie.pay_date
+     FROM goal_contributions gc
+     JOIN savings_goals sg ON gc.goal_id = sg.id
+     JOIN income_entries ie ON gc.income_entry_id = ie.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2`,
+    [startDate, today]
+  )).rows;
+
+  // Mortgage events
+  const mortgageAmt = 4656.64;
+  const mortgageDates = new Set();
+  {
+    const s = new Date(startDate + 'T00:00:00');
+    const e = new Date(today + 'T00:00:00');
+    const c = new Date(s.getFullYear(), s.getMonth(), 23);
+    if (c < s) c.setMonth(c.getMonth() + 1);
+    while (c <= e) {
+      mortgageDates.add(c.toISOString().split('T')[0]);
+      c.setMonth(c.getMonth() + 1);
+    }
+  }
 
   const dailySpending = [];
   for (let d = numDays - 1; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
     if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
-    dailySpending.push({ date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) });
+    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) };
+
+    const dayPayEvents = payEventsRaw.filter(pe => pe.pay_date === date);
+    if (dayPayEvents.length > 0) {
+      dayData.payday = dayPayEvents.map(pe => ({
+        user_name: pe.user_name,
+        net_pay: pe.net_amount || pe.amount,
+        offset_transfer: pe.offset_transfer || 0,
+        retention: pe.retention_amount || 0,
+        goals: goalContribsRaw.filter(gc => gc.pay_date === date).map(gc => ({ name: gc.goal_name, amount: gc.amount }))
+      }));
+      dayData.total_offset_transfer = dayPayEvents.reduce((s, pe) => s + (pe.offset_transfer || 0), 0);
+    }
+    if (mortgageDates.has(date)) {
+      dayData.mortgage_debit = mortgageAmt;
+    }
+
+    dailySpending.push(dayData);
   }
 
-  // Also get the earliest expense date for the "Max" option
   const earliest = (await db.query('SELECT MIN(expense_date) as min_date FROM expenses')).rows[0];
 
   res.json({
@@ -1147,6 +1382,10 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
 
 app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
+
+  // Auto-apply any pending mortgage debits
+  await applyPendingMortgageDebits(db);
+
   const today = new Date().toISOString().split('T')[0];
   const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
   const sevenDaysAgo = clampDate(new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]);

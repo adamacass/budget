@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getDashboard, getInsights, addExpense, extractScreenshot, importScreenshot, getDailySpending } from '../api';
 import { useAuth } from '../context/AuthContext';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area, ReferenceArea } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera, Upload, X, Target, Shield } from 'lucide-react';
 import { CATEGORIES, getCategoryColor, getUserColor, getUserClass } from '../categoryColors';
@@ -402,29 +402,105 @@ export default function Dashboard() {
       </div>
 
       {/* ===== DAILY SPENDING ===== */}
-      <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
-          <div className="card-title" style={{ margin: 0 }}>Daily Spending</div>
-          <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-            {[{ label: '2W', days: 14 }, { label: '1M', days: 30 }, { label: '3M', days: 90 }, { label: '6M', days: 180 }, { label: '1Y', days: 365 }].map(r => (
-              <button key={r.days} className={`btn btn-sm ${spendingRange === r.days ? 'btn-primary' : 'btn-ghost'}`} style={{ padding: '2px 8px', fontSize: '0.7rem', minWidth: 32 }} onClick={() => setSpendingRange(r.days)}>{r.label}</button>
-            ))}
+      {(() => {
+        const chartData = spendingData || insights?.daily_spending || [];
+        const payEvents = chartData.filter(d => d.payday || d.mortgage_debit);
+        return (
+          <div className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
+              <div className="card-title" style={{ margin: 0 }}>Daily Spending</div>
+              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                {[{ label: '2W', days: 14 }, { label: '1M', days: 30 }, { label: '3M', days: 90 }, { label: '6M', days: 180 }, { label: '1Y', days: 365 }].map(r => (
+                  <button key={r.days} className={`btn btn-sm ${spendingRange === r.days ? 'btn-primary' : 'btn-ghost'}`} style={{ padding: '2px 8px', fontSize: '0.7rem', minWidth: 32 }} onClick={() => setSpendingRange(r.days)}>{r.label}</button>
+                ))}
+              </div>
+            </div>
+            {spendingLoading ? <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}><div className="spinner" /></div> : (
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={chartData}
+                  onClick={(e) => { if (e?.activePayload?.[0]?.payload?.full_date) { navigate(`/expenses?start=${e.activePayload[0].payload.full_date}&end=${e.activePayload[0].payload.full_date}`); } }}
+                  style={{ cursor: 'pointer' }}>
+                  <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }} interval={spendingRange > 60 ? Math.floor(spendingRange / 15) : spendingRange > 30 ? 2 : 0} />
+                  <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const d = payload[0].payload;
+                      return (
+                        <div className="payday-tooltip">
+                          <div style={{ fontWeight: 600, marginBottom: 4 }}>{d.full_date}</div>
+                          <div>Spent: <strong>{fmtMoney(d.total)}</strong></div>
+                          {d.payday && d.payday.map((p, i) => (
+                            <div key={i} className="payday-tooltip-event">
+                              <div className="payday-tooltip-title">{p.user_name}'s Pay</div>
+                              <div>Net pay: {fmtMoney(p.net_pay)}</div>
+                              <div style={{ color: '#00b894', fontWeight: 600 }}>+{fmtMoney(p.offset_transfer)} to offset</div>
+                              {p.retention > 0 && <div style={{ color: '#fdcb6e' }}>Retained: {fmtMoney(p.retention)}</div>}
+                              {p.goals?.length > 0 && p.goals.map((g, j) => (
+                                <div key={j} style={{ color: '#6c5ce7', fontSize: '0.78rem' }}>{g.name}: +{fmtMoney(g.amount)}</div>
+                              ))}
+                            </div>
+                          ))}
+                          {d.mortgage_debit && (
+                            <div className="payday-tooltip-event">
+                              <div style={{ color: '#e17055', fontWeight: 600 }}>Mortgage: -{fmtMoney(d.mortgage_debit)}</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }}
+                  />
+                  {dailyBudget > 0 && <ReferenceLine y={dailyBudget} stroke="#00cec9" strokeDasharray="4 3" strokeWidth={1.5} label={{ value: `${fmtMoney(dailyBudget)}/day`, fill: '#00cec9', fontSize: 10, position: 'right' }} />}
+                  <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.15)" strokeWidth={2} activeDot={{ r: 5, stroke: '#6c5ce7', strokeWidth: 2, fill: 'var(--bg-card)' }} />
+                  {/* Payday vertical markers */}
+                  {chartData.map((d, i) => d.payday ? (
+                    <ReferenceLine key={`pay-${i}`} x={d.date} stroke="#00b894" strokeWidth={2} strokeDasharray="none"
+                      label={{ value: `+${fmtK(d.total_offset_transfer)}`, fill: '#00b894', fontSize: 10, fontWeight: 700, position: 'top', offset: 5 }} />
+                  ) : null)}
+                  {/* Mortgage debit vertical markers */}
+                  {chartData.map((d, i) => d.mortgage_debit ? (
+                    <ReferenceLine key={`mtg-${i}`} x={d.date} stroke="#e17055" strokeWidth={1.5} strokeDasharray="6 3"
+                      label={{ value: `-${fmtK(d.mortgage_debit)}`, fill: '#e17055', fontSize: 10, fontWeight: 600, position: 'insideTopRight' }} />
+                  ) : null)}
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+
+            {/* Payday event legend below chart */}
+            {payEvents.length > 0 && (
+              <div className="payday-events-legend">
+                {payEvents.map((d, i) => (
+                  <div key={i} className="payday-event-pill">
+                    {d.payday && d.payday.map((p, j) => (
+                      <span key={j} className="payday-event-item payday-credit">
+                        <span className="payday-event-dot" style={{ background: '#00b894' }} />
+                        <span className="payday-event-date">{d.date}</span>
+                        <strong>+{fmtMoney(p.offset_transfer)}</strong>
+                        <span className="payday-event-user">{p.user_name}</span>
+                        {p.goals?.length > 0 && (
+                          <span className="payday-event-goals">
+                            {p.goals.map((g, k) => (
+                              <span key={k} className="payday-goal-chip">{g.name} +{fmtMoney(g.amount)}</span>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                    {d.mortgage_debit && (
+                      <span className="payday-event-item payday-debit">
+                        <span className="payday-event-dot" style={{ background: '#e17055' }} />
+                        <span className="payday-event-date">{d.date}</span>
+                        <strong>-{fmtMoney(d.mortgage_debit)}</strong>
+                        <span className="payday-event-user">Mortgage</span>
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-        {spendingLoading ? <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}><div className="spinner" /></div> : (
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={spendingData || insights?.daily_spending || []}
-              onClick={(e) => { if (e?.activePayload?.[0]?.payload?.full_date) { navigate(`/expenses?start=${e.activePayload[0].payload.full_date}&end=${e.activePayload[0].payload.full_date}`); } }}
-              style={{ cursor: 'pointer' }}>
-              <XAxis dataKey="date" tick={{ fill: '#8b8fa3', fontSize: 10 }} interval={spendingRange > 60 ? Math.floor(spendingRange / 15) : spendingRange > 30 ? 2 : 0} />
-              <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} />
-              <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }} formatter={(v) => [fmtMoney(v), 'Spent']} />
-              {dailyBudget > 0 && <ReferenceLine y={dailyBudget} stroke="#00cec9" strokeDasharray="4 3" strokeWidth={1.5} label={{ value: `Budget ${fmtMoney(dailyBudget)}/day`, fill: '#00cec9', fontSize: 10, position: 'right' }} />}
-              <Area type="monotone" dataKey="total" stroke="#6c5ce7" fill="rgba(108,92,231,0.2)" strokeWidth={2} activeDot={{ r: 5, stroke: '#6c5ce7', strokeWidth: 2, fill: 'var(--bg-card)' }} />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
-      </div>
+        );
+      })()}
 
       {/* ===== BY CATEGORY ===== */}
       <div className="card">

@@ -1090,6 +1090,90 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   display: inline-block;
 }
 
+/* ===== Payday Chart Markers ===== */
+.payday-tooltip {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.8rem;
+  color: var(--text);
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.payday-tooltip-event {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  line-height: 1.5;
+}
+.payday-tooltip-title {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: #00b894;
+  margin-bottom: 2px;
+}
+.payday-events-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.payday-event-pill {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.payday-event-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+.payday-event-item.payday-credit {
+  background: rgba(0, 184, 148, 0.12);
+  border: 1px solid rgba(0, 184, 148, 0.25);
+  color: #00b894;
+}
+.payday-event-item.payday-debit {
+  background: rgba(225, 112, 85, 0.12);
+  border: 1px solid rgba(225, 112, 85, 0.25);
+  color: #e17055;
+}
+.payday-event-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.payday-event-date {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.payday-event-user {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-style: italic;
+}
+.payday-event-goals {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 2px;
+}
+.payday-goal-chip {
+  background: rgba(108, 92, 231, 0.15);
+  color: #a29bfe;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
 /* ===== PayDay Steps ===== */
 .payday-steps {
   display: flex;

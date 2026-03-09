@@ -188,6 +188,18 @@ async function initSchema() {
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS offset_transfer REAL');
   } catch (e) { /* columns may already exist */ }
 
+  // Update offset balance to latest known value if it's still at old seed value
+  try {
+    const offsetRow = (await pool.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    if (offsetRow && offsetRow.balance === 57000) {
+      const admin = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+      if (admin) {
+        await pool.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', 58236.51, $1)", [admin.id]);
+        console.log('Updated offset balance from $57,000 to $58,236.51');
+      }
+    }
+  } catch (e) { /* ignore */ }
+
   // Log existing data counts for diagnostics
   const userCount = (await pool.query('SELECT COUNT(*) as count FROM users')).rows[0].count;
   const expenseCount = (await pool.query('SELECT COUNT(*) as count FROM expenses')).rows[0].count;
@@ -211,7 +223,7 @@ async function initSchema() {
     const user1Res = await pool.query('SELECT id FROM users WHERE username = $1', ['adam']);
     const user1Id = user1Res.rows[0]?.id;
     if (user1Id) {
-      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['offset', 57000, user1Id]);
+      await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['offset', 58236.51, user1Id]);
       await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['savings', 0, user1Id]);
       await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['credit_card', 0, user1Id]);
       await pool.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', ['investment', 0, user1Id]);
