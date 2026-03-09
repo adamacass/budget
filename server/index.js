@@ -347,7 +347,27 @@ app.get('/api/income', authMiddleware, asyncHandler(async (req, res) => {
   if (start) { query += ` AND i.pay_date >= $${paramIdx++}`; params.push(start); }
   if (end) { query += ` AND i.pay_date <= $${paramIdx++}`; params.push(end); }
   query += ' ORDER BY i.pay_date DESC';
-  res.json((await db.query(query, params)).rows);
+  const entries = (await db.query(query, params)).rows;
+
+  // Attach goal contributions to each entry
+  const entryIds = entries.map(e => e.id);
+  let goalContribs = [];
+  if (entryIds.length > 0) {
+    goalContribs = (await db.query(
+      `SELECT gc.income_entry_id, gc.amount, sg.name as goal_name
+       FROM goal_contributions gc
+       JOIN savings_goals sg ON gc.goal_id = sg.id
+       WHERE gc.income_entry_id = ANY($1)`,
+      [entryIds]
+    )).rows;
+  }
+
+  const enriched = entries.map(e => ({
+    ...e,
+    goal_contributions: goalContribs.filter(gc => gc.income_entry_id === e.id)
+  }));
+
+  res.json(enriched);
 }));
 
 app.post('/api/income', authMiddleware, asyncHandler(async (req, res) => {
@@ -446,6 +466,40 @@ app.delete('/api/goals/:id', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   await db.query('UPDATE savings_goals SET active = 0 WHERE id = $1', [req.params.id]);
   res.json({ message: 'Goal deactivated' });
+}));
+
+// Bulk redistribute offset among goals
+app.post('/api/goals/redistribute', authMiddleware, asyncHandler(async (req, res) => {
+  const { allocations } = req.body; // [{ goal_id, amount }]
+  const db = await getDb();
+
+  // Validate: total allocations must not exceed offset balance
+  const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  const offsetBal = offsetRow ? offsetRow.balance : 0;
+  const totalAllocated = allocations.reduce((s, a) => s + (a.amount || 0), 0);
+
+  if (totalAllocated > offsetBal + 0.01) {
+    return res.status(400).json({ error: `Total allocations ($${totalAllocated.toFixed(2)}) exceed offset balance ($${offsetBal.toFixed(2)})` });
+  }
+
+  // Update each goal's current_amount
+  for (const a of allocations) {
+    await db.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2 AND active = 1', [Math.max(0, a.amount || 0), a.goal_id]);
+  }
+
+  // Record contributions for audit
+  for (const a of allocations) {
+    const goal = (await db.query('SELECT current_amount FROM savings_goals WHERE id = $1', [a.goal_id])).rows[0];
+    if (goal) {
+      await db.query(
+        'INSERT INTO goal_contributions (goal_id, user_id, amount, notes) VALUES ($1, $2, $3, $4)',
+        [a.goal_id, req.user.id, a.amount || 0, 'Redistribution']
+      );
+    }
+  }
+
+  const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  res.json({ goals, offset_balance: offsetBal });
 }));
 
 // ===================== LEVERS =====================
@@ -759,27 +813,44 @@ async function applyPendingMortgageDebits(db) {
   const mortgage = 4656.64;
   const today = new Date();
 
-  // Check last recorded mortgage debit
-  const lastDebit = (await db.query(
-    "SELECT allocated_date FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit' ORDER BY allocated_date DESC LIMIT 1"
+  // Check if we've initialized past mortgage records
+  // The current balance ($58,236.51) ALREADY reflects all past mortgage debits,
+  // so we only seed records (not deduct) for past months, and only deduct going forward
+  const anyExisting = (await db.query(
+    "SELECT COUNT(*) as cnt FROM fund_allocations WHERE target_account = 'offset' AND notes LIKE 'Mortgage%'"
   )).rows[0];
 
+  const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+  const userId = admin?.id || 1;
+
+  if (parseInt(anyExisting.cnt) === 0) {
+    // First run: seed all past 23rds as "already applied" (balance already reflects them)
+    for (let y = 2026; y <= today.getFullYear(); y++) {
+      for (let m = 0; m < 12; m++) {
+        const debitDate = new Date(y, m, 23);
+        if (debitDate > today) break;
+        const dateStr = debitDate.toISOString().split('T')[0];
+        if (dateStr < '2026-01-01') continue;
+        await db.query(
+          "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit (historical)')",
+          [userId, -mortgage, dateStr]
+        );
+      }
+    }
+    return 0; // No balance adjustments — already reflected
+  }
+
+  // Subsequent runs: only apply NEW mortgage debits (23rds that have passed since last check)
   const debitsToApply = [];
-
-  // Find all 23rds from DATA_START_DATE to today that haven't been debited
-  const startYear = 2026;
-  const startMonth = 0; // January
-
-  for (let y = startYear; y <= today.getFullYear(); y++) {
-    for (let m = (y === startYear ? startMonth : 0); m < 12; m++) {
+  for (let y = 2026; y <= today.getFullYear(); y++) {
+    for (let m = 0; m < 12; m++) {
       const debitDate = new Date(y, m, 23);
       if (debitDate > today) break;
       const dateStr = debitDate.toISOString().split('T')[0];
       if (dateStr < '2026-01-01') continue;
 
-      // Check if this debit was already recorded
       const existing = (await db.query(
-        "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit' AND allocated_date = $1",
+        "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes LIKE 'Mortgage%' AND allocated_date = $1",
         [dateStr]
       )).rows[0];
 
@@ -789,24 +860,16 @@ async function applyPendingMortgageDebits(db) {
     }
   }
 
-  if (debitsToApply.length > 0) {
-    // Get admin user for updated_by
-    const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
-    const userId = admin?.id || 1;
-
-    for (const dateStr of debitsToApply) {
-      // Record the debit allocation
-      await db.query(
-        "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
-        [userId, -mortgage, dateStr]
-      );
-
-      // Deduct from offset balance
-      const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-      const currentBal = offsetRow ? offsetRow.balance : 0;
-      await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)",
-        [currentBal - mortgage, userId]);
-    }
+  for (const dateStr of debitsToApply) {
+    await db.query(
+      "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
+      [userId, -mortgage, dateStr]
+    );
+    // Deduct from offset balance
+    const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    const currentBal = offsetRow ? offsetRow.balance : 0;
+    await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)",
+      [currentBal - mortgage, userId]);
   }
 
   return debitsToApply.length;
@@ -1576,8 +1639,19 @@ app.get('/api/export', authMiddleware, asyncHandler(async (req, res) => {
 app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const users = (await db.query('SELECT * FROM users')).rows;
+
+  // Support multiple spending pace ranges
+  const paceDays = Math.min(Math.max(parseInt(req.query.pace_days) || 30, 7), 365);
+  const projectionMonths = Math.min(Math.max(parseInt(req.query.months) || 12, 3), 60);
+  const paceStart = clampDate(new Date(Date.now() - paceDays * 86400000).toISOString().split('T')[0]);
   const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
+  const paceExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [paceStart])).rows[0];
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+
+  // Calculate actual days elapsed for accurate pace
+  const actualDaysElapsed = Math.max(1, Math.floor((Date.now() - new Date(paceStart + 'T00:00:00').getTime()) / 86400000));
+  const dailySpendRate = (parseFloat(paceExpenses.total) || 0) / actualDaysElapsed;
+  const monthlyExpenseAtPace = dailySpendRate * 30.44;
 
   // Calculate combined net income (rough estimate)
   let totalAnnualNet = 0;
@@ -1597,8 +1671,8 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const monthlyNetIncome = totalAnnualNet / 12;
   const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
   const mortgage = 4656.64;
-  // Offset-centric: mortgage is auto-debited from offset by bank, NOT subtracted from surplus
-  const monthlySurplus = monthlyNetIncome - monthlyExpenseAvg;
+  // Use pace-based expenses for projections
+  const monthlySurplus = monthlyNetIncome - monthlyExpenseAtPace;
 
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
   const offsetBalance = offsetRow ? offsetRow.balance : 0;
@@ -1612,27 +1686,35 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget;
 
-  // Project 12 months — all surplus goes to offset (minus mortgage auto-debit)
+  // Project N months — all surplus goes to offset (minus mortgage auto-debit)
   const projections = [];
   let runningOffset = offsetBalance;
-  const netOffsetGrowth = Math.max(0, budgetedSurplus) - mortgage; // surplus in, mortgage out
+  const paceBasedSurplus = Math.max(0, monthlySurplus);
+  const netOffsetGrowth = paceBasedSurplus - mortgage;
 
-  for (let m = 1; m <= 12; m++) {
+  for (let m = 1; m <= projectionMonths; m++) {
     const date = new Date();
     date.setMonth(date.getMonth() + m);
     runningOffset += netOffsetGrowth;
-    // Interest saved calculation
     const mortgageRate = 0.062;
     const monthlyInterestSaved = (runningOffset * mortgageRate) / 12;
     projections.push({
       month: date.toISOString().substring(0, 7),
       offset: Math.round(runningOffset),
-      surplus_added: Math.round(Math.max(0, budgetedSurplus)),
+      surplus_added: Math.round(paceBasedSurplus),
       mortgage_debited: Math.round(mortgage),
       net_growth: Math.round(netOffsetGrowth),
       interest_saved: Math.round(monthlyInterestSaved),
     });
   }
+
+  // Milestone summaries
+  const milestones = {};
+  [12, 24, 36, 60].forEach(m => {
+    if (m <= projectionMonths && projections[m - 1]) {
+      milestones[`${m}mo`] = projections[m - 1].offset;
+    }
+  });
 
   // Goal achievement forecast
   const goalForecasts = goals.map(g => {
@@ -1667,12 +1749,17 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   res.json({
     monthly_net_income: Math.round(monthlyNetIncome),
     monthly_expenses: Math.round(monthlyExpenseAvg),
+    monthly_expenses_at_pace: Math.round(monthlyExpenseAtPace),
+    pace_days: paceDays,
+    daily_spend_rate: Math.round(dailySpendRate),
     mortgage,
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
     budgeted_surplus: Math.round(budgetedSurplus),
     net_offset_growth: Math.round(netOffsetGrowth),
     projections,
+    projection_months: projectionMonths,
+    milestones,
     offset_balance: offsetBalance,
     goals: goalForecasts,
     benchmarks: sydneyBenchmarks,

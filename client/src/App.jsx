@@ -11,7 +11,6 @@ import PayDay from './pages/PayDay';
 import Goals from './pages/Goals';
 import Projections from './pages/Projections';
 import Settings from './pages/Settings';
-import Advice from './pages/Advice';
 import Statements from './pages/Statements';
 
 function ProtectedRoute({ children }) {
@@ -34,7 +33,6 @@ export default function App() {
         <Route path="payday" element={<PayDay />} />
         <Route path="goals" element={<Goals />} />
         <Route path="projections" element={<Projections />} />
-        <Route path="advice" element={<Advice />} />
         <Route path="statements" element={<Statements />} />
         <Route path="settings" element={<Settings />} />
       </Route>

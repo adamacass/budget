@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getGoals, addGoal, updateGoal, deleteGoal, getLevers, addLever, updateLever, deleteLever, getBalances, getRetention, updateRetention } from '../api';
-import { Target, Sliders, Plus, Trash2, Edit3, Shield } from 'lucide-react';
+import { getGoals, addGoal, updateGoal, deleteGoal, redistributeGoals, getLevers, addLever, updateLever, deleteLever, getBalances, getRetention, updateRetention } from '../api';
+import { Target, Sliders, Plus, Trash2, Edit3, Shield, RefreshCw } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
 const bucketColors = ['#6c5ce7', '#00cec9', '#fd79a8', '#fdcb6e', '#e17055', '#55efc4'];
@@ -17,6 +17,9 @@ export default function Goals() {
   const [form, setForm] = useState({ name: '', target_amount: '', current_amount: '', priority: 5, target_date: '', is_joint: true });
   const [editId, setEditId] = useState(null);
   const [leverForm, setLeverForm] = useState({ name: '', lever_type: 'percentage', value: '', description: '' });
+  const [redistributing, setRedistributing] = useState(false);
+  const [redistAmounts, setRedistAmounts] = useState({});
+  const [redistSaving, setRedistSaving] = useState(false);
 
   useEffect(() => {
     getGoals().then(setGoals).catch(console.error);
@@ -75,6 +78,49 @@ export default function Goals() {
     setRetention(updated);
   }
 
+  function startRedistribute() {
+    const amounts = {};
+    goals.forEach(g => { amounts[g.id] = g.current_amount || 0; });
+    setRedistAmounts(amounts);
+    setRedistributing(true);
+  }
+
+  function updateRedistAmount(goalId, val) {
+    setRedistAmounts(prev => ({ ...prev, [goalId]: Math.max(0, parseFloat(val) || 0) }));
+  }
+
+  const redistTotal = Object.values(redistAmounts).reduce((s, v) => s + v, 0);
+  const redistRemaining = offsetBalance - redistTotal;
+
+  async function handleRedistSave() {
+    setRedistSaving(true);
+    try {
+      const allocations = goals.map(g => ({ goal_id: g.id, amount: redistAmounts[g.id] || 0 }));
+      const result = await redistributeGoals(allocations);
+      setGoals(result.goals);
+      setRedistributing(false);
+    } catch (err) {
+      alert(err.message);
+    }
+    setRedistSaving(false);
+  }
+
+  function redistAutoFill() {
+    // Distribute proportionally based on remaining target
+    const amounts = {};
+    const remaining = goals.map(g => ({ id: g.id, remaining: Math.max(0, g.target_amount - 0), target: g.target_amount }));
+    const totalTarget = remaining.reduce((s, r) => s + r.target, 0);
+    if (totalTarget > 0) {
+      let used = 0;
+      remaining.forEach((r, i) => {
+        const share = i === remaining.length - 1 ? offsetBalance - used : Math.round((r.target / totalTarget) * offsetBalance);
+        amounts[r.id] = Math.min(share, r.target);
+        used += amounts[r.id];
+      });
+    }
+    setRedistAmounts(amounts);
+  }
+
   return (
     <div>
       <div className="page-header">
@@ -123,6 +169,89 @@ export default function Goals() {
               </div>
             )}
           </div>
+
+          {/* Redistribute panel */}
+          {redistributing && (
+            <div className="card redistribute-card" style={{ marginBottom: '1rem', border: '2px solid var(--accent)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <div className="card-title" style={{ margin: 0 }}><RefreshCw size={16} /> Redistribute Offset</div>
+                <button className="btn btn-ghost btn-sm" onClick={redistAutoFill}>Auto-fill by target</button>
+              </div>
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+                Allocate your {fmtMoney(offsetBalance)} offset balance across your goal buckets.
+              </p>
+
+              {/* Visual bar of redistribution */}
+              <div style={{ display: 'flex', height: 16, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-input)', marginBottom: '1rem' }}>
+                {goals.map((g, i) => {
+                  const w = offsetBalance > 0 ? ((redistAmounts[g.id] || 0) / offsetBalance * 100) : 0;
+                  return w > 0 ? <div key={g.id} style={{ width: `${w}%`, background: bucketColors[i % bucketColors.length], transition: 'width 0.2s' }} title={`${g.name}: ${fmtMoney(redistAmounts[g.id])}`} /> : null;
+                })}
+                {redistRemaining > 0 && offsetBalance > 0 && (
+                  <div style={{ width: `${(redistRemaining / offsetBalance * 100)}%`, background: 'rgba(255,255,255,0.08)' }} title={`Unallocated: ${fmtMoney(redistRemaining)}`} />
+                )}
+              </div>
+
+              {goals.map((g, i) => {
+                const amt = redistAmounts[g.id] || 0;
+                const pct = g.target_amount > 0 ? (amt / g.target_amount * 100) : 0;
+                return (
+                  <div key={g.id} className="redist-row" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.6rem 0', borderBottom: '1px solid var(--border)' }}>
+                    <span className="offset-bucket-dot" style={{ background: bucketColors[i % bucketColors.length], width: 10, height: 10, flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>{g.name}</div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        Target: {fmtMoney(g.target_amount)} · {pct.toFixed(0)}%
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>$</span>
+                      <input
+                        className="form-input"
+                        type="number"
+                        step="100"
+                        min="0"
+                        max={offsetBalance}
+                        value={amt}
+                        onChange={e => updateRedistAmount(g.id, e.target.value)}
+                        style={{ width: 120, textAlign: 'right', fontWeight: 700, fontSize: '1rem' }}
+                      />
+                      <input
+                        type="range"
+                        min="0"
+                        max={g.target_amount || offsetBalance}
+                        step="100"
+                        value={amt}
+                        onChange={e => updateRedistAmount(g.id, e.target.value)}
+                        style={{ width: 100, accentColor: bucketColors[i % bucketColors.length] }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', padding: '0.75rem', background: redistRemaining < -0.01 ? 'rgba(255,100,100,0.1)' : 'rgba(0,206,201,0.08)', borderRadius: 8 }}>
+                <div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Allocated: {fmtMoney(redistTotal)} / {fmtMoney(offsetBalance)}</div>
+                  <div style={{ fontSize: '1rem', fontWeight: 700, color: redistRemaining < -0.01 ? 'var(--red)' : 'var(--green)' }}>
+                    {redistRemaining >= 0 ? `${fmtMoney(redistRemaining)} unallocated` : `Over by ${fmtMoney(Math.abs(redistRemaining))}`}
+                  </div>
+                </div>
+                <div className="btn-group">
+                  <button className="btn btn-ghost" onClick={() => setRedistributing(false)}>Cancel</button>
+                  <button className="btn btn-primary" onClick={handleRedistSave} disabled={redistSaving || redistRemaining < -0.01}>
+                    {redistSaving ? 'Saving...' : 'Apply'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!redistributing && goals.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+              <button className="btn btn-ghost" onClick={startRedistribute}><RefreshCw size={14} /> Redistribute</button>
+            </div>
+          )}
 
           {goals.map((g, i) => {
             const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount * 100) : 0;

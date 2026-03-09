@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { addIncome, getBalances, getRetention, getPayDayAdvice, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals } from '../api';
-import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Info } from 'lucide-react';
+import { addIncome, getIncome, getBalances, getRetention, getPayDayAdvice, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals } from '../api';
+import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Info, Clock } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtK(n) { return n >= 1000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
@@ -27,6 +27,9 @@ export default function PayDay() {
   const [goalAllocations, setGoalAllocations] = useState({});
   const [saved, setSaved] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
+  // History
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
   // Sweep mode
   const [txnBalance, setTxnBalance] = useState('');
   const [sweepAmount, setSweepAmount] = useState('');
@@ -35,6 +38,7 @@ export default function PayDay() {
     getBalances().then(setBalances).catch(console.error);
     getUpcomingExpenses().then(setUpcoming).catch(console.error);
     getGoals().then(setGoals).catch(console.error);
+    getIncome().then(setHistory).catch(console.error);
   }, []);
 
   // Estimate net pay from gross
@@ -579,6 +583,93 @@ export default function PayDay() {
             <div style={{ fontSize: '1rem', fontWeight: 700 }}>6.20%</div>
           </div>
         </div>
+      </div>
+
+      {/* ==================== PAY HISTORY ==================== */}
+      <div className="card" style={{ marginTop: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: showHistory ? '1rem' : 0 }}>
+          <div className="card-title" style={{ margin: 0 }}><Clock size={16} /> Pay History</div>
+          <button className="btn btn-ghost btn-sm" onClick={() => setShowHistory(!showHistory)}>
+            {showHistory ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {showHistory ? 'Hide' : `Show (${history.length})`}
+          </button>
+        </div>
+
+        {showHistory && (
+          <div>
+            {history.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No pay entries recorded yet.</p>
+            ) : (
+              <div className="pay-history-list">
+                {history.map(h => {
+                  const offsetAmt = h.offset_transfer || 0;
+                  const retainAmt = h.retention_amount || 0;
+                  const netAmt = h.net_amount || h.amount;
+                  const hasGoals = h.goal_contributions && h.goal_contributions.length > 0;
+                  const isExtra = offsetAmt > netAmt * 0.5; // More than 50% to offset = highlighted
+                  return (
+                    <div key={h.id} className={`pay-history-row ${isExtra ? 'pay-history-extra' : ''}`}>
+                      <div className="pay-history-date">
+                        <div className="pay-history-day">{new Date(h.pay_date + 'T12:00:00').toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}</div>
+                        <div className="pay-history-year">{h.pay_date.substring(0, 4)}</div>
+                      </div>
+                      <div className="pay-history-details">
+                        <div className="pay-history-header">
+                          <span className="pay-history-user">{h.user_name}</span>
+                          <span className="pay-history-type">{h.pay_type}</span>
+                          {h.notes && <span className="pay-history-notes">{h.notes}</span>}
+                        </div>
+                        <div className="pay-history-amounts">
+                          <span className="pay-history-net">Net: <strong>{fmtMoney(netAmt)}</strong></span>
+                          {offsetAmt > 0 && (
+                            <span className="pay-history-offset">
+                              → Offset: <strong style={{ color: '#00b894' }}>+{fmtMoney(offsetAmt)}</strong>
+                              {isExtra && <span className="pay-history-bonus-badge">Extra!</span>}
+                            </span>
+                          )}
+                          {retainAmt > 0 && (
+                            <span className="pay-history-retain">Retained: {fmtMoney(retainAmt)}</span>
+                          )}
+                        </div>
+                        {hasGoals && (
+                          <div className="pay-history-goals">
+                            {h.goal_contributions.map((gc, j) => (
+                              <span key={j} className="payday-goal-chip">{gc.goal_name}: +{fmtMoney(gc.amount)}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Summary stats */}
+            {history.length > 0 && (
+              <div className="pay-history-summary">
+                <div className="pay-history-summary-stat">
+                  <span className="pay-history-summary-label">Total Pays</span>
+                  <span className="pay-history-summary-value">{history.length}</span>
+                </div>
+                <div className="pay-history-summary-stat">
+                  <span className="pay-history-summary-label">Total Net Income</span>
+                  <span className="pay-history-summary-value">{fmtMoney(history.reduce((s, h) => s + (h.net_amount || h.amount || 0), 0))}</span>
+                </div>
+                <div className="pay-history-summary-stat">
+                  <span className="pay-history-summary-label">Total to Offset</span>
+                  <span className="pay-history-summary-value" style={{ color: '#00b894' }}>+{fmtMoney(history.reduce((s, h) => s + (h.offset_transfer || 0), 0))}</span>
+                </div>
+                <div className="pay-history-summary-stat">
+                  <span className="pay-history-summary-label">Avg Offset/Pay</span>
+                  <span className="pay-history-summary-value" style={{ color: '#00b894' }}>
+                    {fmtMoney(history.reduce((s, h) => s + (h.offset_transfer || 0), 0) / history.length)}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

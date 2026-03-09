@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Brain, Settings, Download, CreditCard, PiggyBank, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Settings, Download, CreditCard, PiggyBank, Sun, Moon } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
@@ -16,7 +16,6 @@ const navItems = [
   { to: '/goals', icon: Target, label: 'Goals & Levers' },
   { to: '/projections', icon: TrendingUp, label: 'Projections' },
   { to: '/statements', icon: CreditCard, label: 'Import Statement' },
-  { to: '/advice', icon: Brain, label: 'Claude Advice' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 

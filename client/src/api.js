@@ -68,6 +68,7 @@ export const getGoals = () => apiFetch('/api/goals');
 export const addGoal = (data) => apiFetch('/api/goals', { method: 'POST', body: JSON.stringify(data) });
 export const updateGoal = (id, data) => apiFetch(`/api/goals/${id}`, { method: 'PUT', body: JSON.stringify(data) });
 export const deleteGoal = (id) => apiFetch(`/api/goals/${id}`, { method: 'DELETE' });
+export const redistributeGoals = (allocations) => apiFetch('/api/goals/redistribute', { method: 'POST', body: JSON.stringify({ allocations }) });
 
 // Levers
 export const getLevers = () => apiFetch('/api/levers');
@@ -120,7 +121,10 @@ export const getDailySpending = (days = 14) => apiFetch(`/api/daily-spending?day
 export const getPaydayEvents = (days = 14) => apiFetch(`/api/payday-events?days=${days}`);
 
 // Projections
-export const getProjections = () => apiFetch('/api/projections');
+export const getProjections = (params = {}) => {
+  const qs = new URLSearchParams(params).toString();
+  return apiFetch(`/api/projections${qs ? '?' + qs : ''}`);
+};
 
 // Backup
 export const downloadBackup = async () => {

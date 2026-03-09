@@ -1174,6 +1174,81 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   font-weight: 600;
 }
 
+/* ===== Pay History ===== */
+.pay-history-list { display: flex; flex-direction: column; gap: 2px; }
+.pay-history-row {
+  display: flex;
+  gap: 1rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--bg-input);
+  transition: background 0.15s;
+}
+.pay-history-row:hover { background: var(--bg-card-hover); }
+.pay-history-row.pay-history-extra {
+  border-left: 3px solid #00b894;
+  background: rgba(0, 184, 148, 0.06);
+}
+.pay-history-date {
+  text-align: center;
+  min-width: 50px;
+  flex-shrink: 0;
+}
+.pay-history-day { font-weight: 700; font-size: 0.88rem; }
+.pay-history-year { font-size: 0.68rem; color: var(--text-muted); }
+.pay-history-details { flex: 1; min-width: 0; }
+.pay-history-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.pay-history-user { font-weight: 700; font-size: 0.88rem; }
+.pay-history-type {
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(108, 92, 231, 0.15);
+  color: var(--accent);
+  text-transform: capitalize;
+}
+.pay-history-notes { font-size: 0.75rem; color: var(--text-muted); font-style: italic; }
+.pay-history-amounts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+}
+.pay-history-net { color: var(--text); }
+.pay-history-offset { display: inline-flex; align-items: center; gap: 4px; }
+.pay-history-retain { color: var(--text-muted); }
+.pay-history-bonus-badge {
+  font-size: 0.65rem;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 184, 148, 0.2);
+  color: #00b894;
+  font-weight: 700;
+}
+.pay-history-goals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.pay-history-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.pay-history-summary-stat { text-align: center; flex: 1; min-width: 100px; }
+.pay-history-summary-label { display: block; font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.pay-history-summary-value { display: block; font-size: 1rem; font-weight: 700; margin-top: 2px; }
+
 /* ===== PayDay Steps ===== */
 .payday-steps {
   display: flex;
