@@ -88,6 +88,9 @@ export const updateRetention = (userId, data) => apiFetch(`/api/retention/${user
 // PayDay Complete (offset-centric)
 export const completePayDay = (data) => apiFetch('/api/payday/complete', { method: 'POST', body: JSON.stringify(data) });
 
+// Offset Contributions (per-user breakdown)
+export const getOffsetContributions = () => apiFetch('/api/offset-contributions');
+
 // Goal Contributions
 export const getGoalContributions = (goalId) => apiFetch(`/api/goal-contributions/${goalId}`);
 

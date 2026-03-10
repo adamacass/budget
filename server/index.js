@@ -749,6 +749,59 @@ app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) =
   }
 }));
 
+// ===================== OFFSET CONTRIBUTION BREAKDOWN =====================
+
+app.get('/api/offset-contributions', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+
+  // Per-user totals
+  const perUser = (await db.query(`
+    SELECT u.id, u.display_name, u.pay_cycle, u.mortgage_contribution,
+           COUNT(ie.id) as pay_count,
+           COALESCE(SUM(ie.offset_transfer), 0) as total_offset,
+           COALESCE(SUM(ie.mortgage_contribution), 0) as total_mortgage_contrib,
+           COALESCE(SUM(ie.net_amount), 0) as total_net,
+           COALESCE(SUM(ie.retention_amount), 0) as total_retained,
+           COALESCE(AVG(ie.offset_transfer), 0) as avg_offset_per_pay,
+           MAX(ie.pay_date) as last_pay_date
+    FROM users u
+    LEFT JOIN income_entries ie ON u.id = ie.user_id
+    GROUP BY u.id, u.display_name, u.pay_cycle, u.mortgage_contribution
+    ORDER BY total_offset DESC
+  `)).rows;
+
+  // Monthly breakdown per user (last 6 months)
+  const sixMonthsAgo = new Date(Date.now() - 180 * 86400000).toISOString().split('T')[0];
+  const monthly = (await db.query(`
+    SELECT u.display_name,
+           TO_CHAR(ie.pay_date::date, 'YYYY-MM') as month,
+           SUM(ie.offset_transfer) as offset_total,
+           SUM(ie.mortgage_contribution) as mortgage_total,
+           COUNT(*) as pay_count
+    FROM income_entries ie
+    JOIN users u ON ie.user_id = u.id
+    WHERE ie.pay_date >= $1
+    GROUP BY u.display_name, TO_CHAR(ie.pay_date::date, 'YYYY-MM')
+    ORDER BY month ASC, u.display_name
+  `, [sixMonthsAgo])).rows;
+
+  const grandTotal = perUser.reduce((s, u) => s + parseFloat(u.total_offset), 0);
+
+  res.json({
+    per_user: perUser.map(u => ({
+      ...u,
+      total_offset: parseFloat(u.total_offset),
+      total_mortgage_contrib: parseFloat(u.total_mortgage_contrib),
+      total_net: parseFloat(u.total_net),
+      total_retained: parseFloat(u.total_retained),
+      avg_offset_per_pay: parseFloat(u.avg_offset_per_pay),
+      share_pct: grandTotal > 0 ? Math.round(parseFloat(u.total_offset) / grandTotal * 100) : 0
+    })),
+    monthly,
+    grand_total: grandTotal
+  });
+}));
+
 // ===================== GOAL CONTRIBUTIONS =====================
 
 app.get('/api/goal-contributions/:goalId', authMiddleware, asyncHandler(async (req, res) => {
