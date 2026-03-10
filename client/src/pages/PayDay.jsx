@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { addIncome, getIncome, getBalances, getRetention, getPayDayAdvice, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals } from '../api';
-import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Info, Clock } from 'lucide-react';
+import { addIncome, getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals } from '../api';
+import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtK(n) { return n >= 1000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
@@ -18,8 +18,6 @@ export default function PayDay() {
   const [balances, setBalances] = useState({});
   const [retention, setRetention] = useState(null);
   const [retentionOverride, setRetentionOverride] = useState('');
-  const [advice, setAdvice] = useState(null);
-  const [adviceLoading, setAdviceLoading] = useState(false);
   const [upcoming, setUpcoming] = useState([]);
   const [showAddUpcoming, setShowAddUpcoming] = useState(false);
   const [upcomingForm, setUpcomingForm] = useState({ description: '', estimated_amount: '', expected_date: '', category: '', notes: '' });
@@ -33,6 +31,8 @@ export default function PayDay() {
   // Sweep mode
   const [txnBalance, setTxnBalance] = useState('');
   const [sweepAmount, setSweepAmount] = useState('');
+  const [sweepAdvice, setSweepAdvice] = useState(null);
+  const [sweepLoading, setSweepLoading] = useState(false);
 
   useEffect(() => {
     getBalances().then(setBalances).catch(console.error);
@@ -73,20 +73,10 @@ export default function PayDay() {
   }
 
   const effectiveRetention = parseFloat(retentionOverride) || 0;
-  const surplus = Math.max(0, parseFloat(netPay) - effectiveRetention);
+  const mortgagePerPeriod = retention?.mortgage_per_period || 0;
+  const totalToOffset = Math.max(0, parseFloat(netPay) - effectiveRetention);
+  const trueSurplus = Math.max(0, totalToOffset - mortgagePerPeriod);
   const totalGoalAlloc = Object.values(goalAllocations).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-
-  async function handleGetAdvice() {
-    setAdviceLoading(true);
-    try {
-      const result = await getPayDayAdvice({
-        net_pay: parseFloat(netPay),
-        retention_data: retention
-      });
-      setAdvice(result.advice);
-    } catch (err) { console.error(err); }
-    setAdviceLoading(false);
-  }
 
   async function handleComplete() {
     try {
@@ -101,7 +91,8 @@ export default function PayDay() {
         pay_type: payType,
         notes,
         retention_amount: effectiveRetention,
-        offset_amount: surplus,
+        mortgage_contribution: mortgagePerPeriod,
+        offset_amount: totalToOffset,
         goal_allocations: goalAllocs
       });
       setSaved(true);
@@ -125,16 +116,15 @@ export default function PayDay() {
 
   // Sweep mode handlers
   async function handleSweepAdvice() {
-    setAdviceLoading(true);
+    setSweepLoading(true);
     try {
       const result = await getAccountSweepAdvice({ transaction_balance: parseFloat(txnBalance) });
-      setAdvice(result.advice);
-      // Extract suggested amount
+      setSweepAdvice(result.advice);
       const match = result.advice.match(/(?:transfer|sweep|send|move)\s*\$?([\d,]+(?:\.\d{2})?)/i);
       if (match) setSweepAmount(match[1].replace(/,/g, ''));
       setStep(3);
     } catch (err) { alert(err.message); }
-    setAdviceLoading(false);
+    setSweepLoading(false);
   }
 
   async function handleSweepConfirm() {
@@ -146,6 +136,7 @@ export default function PayDay() {
         pay_type: 'sweep',
         notes: 'Account sweep to offset',
         retention_amount: parseFloat(txnBalance) - parseFloat(sweepAmount),
+        mortgage_contribution: 0,
         offset_amount: parseFloat(sweepAmount),
         goal_allocations: []
       });
@@ -157,7 +148,7 @@ export default function PayDay() {
   function handleModeSwitch(newMode) {
     setMode(newMode);
     setStep(1);
-    setAdvice(null);
+    setSweepAdvice(null);
     setSaved(false);
     setRetention(null);
   }
@@ -253,7 +244,10 @@ export default function PayDay() {
           <div className="card" style={{ borderLeft: '4px solid var(--accent)' }}>
             <div className="card-title"><Shield size={18} /> Your Retention</div>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-              Based on your last {retention.lookback_weeks} weeks of spending, here's how much to keep for expenses.
+              {retention.used_budget_floor
+                ? <>Based on your monthly budget (more conservative than recent spending). Keeps enough for a full pay period of expenses.</>
+                : <>Based on your last {retention.lookback_weeks} weeks of spending + {retention.profile?.buffer_percent || 10}% buffer.</>
+              }
             </p>
 
             <div className="retention-hero">
@@ -266,6 +260,12 @@ export default function PayDay() {
                   <span>Buffer ({retention.profile?.buffer_percent || 10}%)</span>
                   <span>+{fmtMoney(retention.buffer_amount)}</span>
                 </div>
+                {retention.used_budget_floor && (
+                  <div className="retention-row" style={{ color: 'var(--accent)', fontSize: '0.8rem' }}>
+                    <span>Budget floor (per period)</span>
+                    <span>{fmtMoney(retention.budget_per_period)}</span>
+                  </div>
+                )}
                 {retention.upcoming_extra > 0 && (
                   <div className="retention-row">
                     <span>Upcoming expenses</span>
@@ -308,22 +308,64 @@ export default function PayDay() {
             )}
           </div>
 
-          {/* Surplus display */}
+          {/* Transfer summary with mortgage line */}
           <div className="card offset-hero-card" style={{ marginTop: '1rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
-              <div>
-                <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: 1, color: 'var(--text-muted)', marginBottom: 4 }}>Surplus to Offset</div>
-                <div style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--green)' }}>{fmtMoney(surplus)}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  {fmtMoney(parseFloat(netPay))} pay − {fmtMoney(effectiveRetention)} retention
-                </div>
+            <div className="card-title"><TrendingUp size={18} /> Transfer Summary</div>
+            <div className="retention-breakdown">
+              <div className="retention-row">
+                <span>Net pay</span>
+                <span>{fmtMoney(parseFloat(netPay))}</span>
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Current offset</div>
-                <div style={{ fontSize: '1.2rem', fontWeight: 700 }}>{fmtK(balances.offset || 0)}</div>
-                <div style={{ fontSize: '0.8rem', color: 'var(--green)' }}>→ {fmtK((balances.offset || 0) + surplus)} after</div>
+              <div className="retention-row">
+                <span>Retention (kept for expenses)</span>
+                <span style={{ color: 'var(--red)' }}>−{fmtMoney(effectiveRetention)}</span>
+              </div>
+              <div className="retention-row" style={{ borderBottom: '2px solid var(--border)' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Home size={14} /> Mortgage contribution ({fmtMoney(retention?.mortgage_monthly || 0)}/mo)
+                </span>
+                <span style={{ color: 'var(--yellow)' }}>−{fmtMoney(mortgagePerPeriod)}</span>
+              </div>
+              <div className="retention-row" style={{ fontWeight: 700, fontSize: '1.1rem' }}>
+                <span style={{ color: 'var(--green)' }}>True surplus to offset goals</span>
+                <span style={{ color: 'var(--green)' }}>{fmtMoney(trueSurplus)}</span>
               </div>
             </div>
+
+            <div style={{ marginTop: '1rem', padding: '0.75rem', background: 'rgba(0,206,201,0.08)', borderRadius: 8, fontSize: '0.85rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span>Mortgage portion → offset (reserved for 25th debit)</span>
+                <span style={{ fontWeight: 600 }}>{fmtMoney(mortgagePerPeriod)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>True surplus → offset (available for goals)</span>
+                <span style={{ fontWeight: 600, color: 'var(--green)' }}>{fmtMoney(trueSurplus)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, paddingTop: 4, borderTop: '1px solid var(--border)', fontWeight: 700 }}>
+                <span>Total to offset account</span>
+                <span style={{ color: 'var(--green)' }}>{fmtMoney(totalToOffset)}</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', marginTop: '1rem' }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Current offset</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700 }}>{fmtK(balances.offset || 0)}</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>After transfer</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--green)' }}>→ {fmtK((balances.offset || 0) + totalToOffset)}</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Interest saved</div>
+                <div style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--green)' }}>~{fmtMoney(((balances.offset || 0) + totalToOffset) * 0.062 / 12)}/mo</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Encouragement */}
+          <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'rgba(0,184,148,0.08)', borderRadius: 8, border: '1px solid rgba(0,184,148,0.2)', fontSize: '0.85rem', color: 'var(--green)' }}>
+            Every dollar in offset saves you 6.2% in mortgage interest. Maximise your transfer — keep retention as low as you can comfortably manage.
           </div>
 
           {/* Upcoming expenses */}
@@ -371,7 +413,7 @@ export default function PayDay() {
           </div>
 
           <div className="btn-group" style={{ marginTop: '1rem' }}>
-            <button className="btn btn-primary" onClick={() => { handleGetAdvice(); setStep(3); }}>
+            <button className="btn btn-primary" onClick={() => setStep(3)}>
               Continue to Confirm
             </button>
             <button className="btn btn-ghost" onClick={() => setStep(1)}>Back</button>
@@ -382,20 +424,6 @@ export default function PayDay() {
       {/* Step 3: Confirm & Allocate */}
       {mode === 'payday' && step === 3 && (
         <div>
-          {/* Claude advice */}
-          {adviceLoading && (
-            <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
-              <div className="spinner" style={{ marginBottom: '0.5rem' }} />
-              <span style={{ color: 'var(--text-muted)' }}>Getting Claude's advice...</span>
-            </div>
-          )}
-          {advice && (
-            <div className="advice-box">
-              <h3>Claude's Advice</h3>
-              {advice}
-            </div>
-          )}
-
           {/* Main confirmation card */}
           <div className="card offset-hero-card">
             <div className="card-title"><TrendingUp size={18} /> Transfer Summary</div>
@@ -408,9 +436,17 @@ export default function PayDay() {
                 <span>Retention (kept for expenses)</span>
                 <span>−{fmtMoney(effectiveRetention)}</span>
               </div>
+              <div className="retention-row">
+                <span><Home size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />Mortgage contribution</span>
+                <span>−{fmtMoney(mortgagePerPeriod)}</span>
+              </div>
+              <div className="retention-row" style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                <span style={{ paddingLeft: '1.2rem' }}>↳ reserved in offset for 25th debit</span>
+                <span></span>
+              </div>
               <div className="retention-row total" style={{ color: 'var(--green)' }}>
-                <span>To offset account</span>
-                <span>{fmtMoney(surplus)}</span>
+                <span>Total to offset account</span>
+                <span>{fmtMoney(totalToOffset)}</span>
               </div>
             </div>
 
@@ -421,21 +457,34 @@ export default function PayDay() {
               </div>
               <div className="stat-card" style={{ flex: 1, minWidth: 140, borderColor: 'var(--green)' }}>
                 <div className="stat-label">Offset After</div>
-                <div className="stat-value positive">{fmtK((balances.offset || 0) + surplus)}</div>
+                <div className="stat-value positive">{fmtK((balances.offset || 0) + totalToOffset)}</div>
               </div>
               <div className="stat-card" style={{ flex: 1, minWidth: 140 }}>
                 <div className="stat-label">Interest Saved</div>
-                <div className="stat-value positive">~{fmtMoney(((balances.offset || 0) + surplus) * 0.062 / 12)}/mo</div>
+                <div className="stat-value positive">~{fmtMoney(((balances.offset || 0) + totalToOffset) * 0.062 / 12)}/mo</div>
+              </div>
+            </div>
+
+            {/* True surplus breakdown */}
+            <div style={{ padding: '0.75rem', background: 'rgba(0,206,201,0.08)', borderRadius: 8, fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Of {fmtMoney(totalToOffset)} going to offset:</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span><Home size={12} style={{ verticalAlign: 'middle' }} /> Mortgage reserve</span>
+                <span>{fmtMoney(mortgagePerPeriod)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--green)', fontWeight: 600 }}>
+                <span>True surplus (available for goals)</span>
+                <span>{fmtMoney(trueSurplus)}</span>
               </div>
             </div>
           </div>
 
-          {/* Goal allocations */}
-          {goals.length > 0 && (
+          {/* Goal allocations — only from true surplus */}
+          {goals.length > 0 && trueSurplus > 0 && (
             <div className="card" style={{ marginTop: '1rem' }}>
-              <div className="card-title"><Target size={18} /> Earmark for Goals (optional)</div>
+              <div className="card-title"><Target size={18} /> Earmark True Surplus for Goals</div>
               <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-                These are virtual buckets within your offset — the money stays in offset earning interest, but is earmarked for specific goals.
+                Allocate from your {fmtMoney(trueSurplus)} true surplus. These are virtual buckets within offset — money stays earning interest.
               </p>
 
               {goals.map(g => {
@@ -460,23 +509,28 @@ export default function PayDay() {
               })}
 
               {totalGoalAlloc > 0 && (
-                <div style={{ fontSize: '0.85rem', color: totalGoalAlloc > surplus ? 'var(--red)' : 'var(--text-muted)', marginTop: '0.5rem' }}>
-                  Earmarking {fmtMoney(totalGoalAlloc)} of {fmtMoney(surplus)} surplus for goals.
-                  {totalGoalAlloc > surplus && ' Warning: exceeds surplus!'}
+                <div style={{ fontSize: '0.85rem', color: totalGoalAlloc > trueSurplus ? 'var(--red)' : 'var(--text-muted)', marginTop: '0.5rem' }}>
+                  Earmarking {fmtMoney(totalGoalAlloc)} of {fmtMoney(trueSurplus)} true surplus for goals.
+                  {totalGoalAlloc > trueSurplus && ' Warning: exceeds true surplus!'}
                 </div>
               )}
             </div>
           )}
 
+          {/* Encouragement */}
+          <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'rgba(0,184,148,0.08)', borderRadius: 8, border: '1px solid rgba(0,184,148,0.2)', fontSize: '0.85rem', color: 'var(--green)' }}>
+            Every dollar in offset saves you 6.2% in mortgage interest. The more you transfer, the faster you pay off the mortgage.
+          </div>
+
           <div className="btn-group" style={{ marginTop: '1rem' }}>
             {saved ? (
               <div className="success-msg" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '1rem', background: 'var(--green-bg)', borderRadius: 8 }}>
-                <CheckCircle size={20} /> Pay recorded! {fmtMoney(surplus)} sent to offset. Balances updated.
+                <CheckCircle size={20} /> Pay recorded! {fmtMoney(totalToOffset)} sent to offset ({fmtMoney(mortgagePerPeriod)} mortgage reserve + {fmtMoney(trueSurplus)} surplus). Balances updated.
               </div>
             ) : (
               <>
-                <button className="btn btn-success" onClick={handleComplete} disabled={surplus <= 0}>
-                  <CheckCircle size={16} /> Send {fmtMoney(surplus)} to Offset
+                <button className="btn btn-success" onClick={handleComplete} disabled={totalToOffset <= 0}>
+                  <CheckCircle size={16} /> Send {fmtMoney(totalToOffset)} to Offset
                 </button>
                 <button className="btn btn-ghost" onClick={() => setStep(2)}>Back</button>
               </>
@@ -520,8 +574,8 @@ export default function PayDay() {
           )}
 
           <div className="btn-group">
-            <button className="btn btn-primary" onClick={handleSweepAdvice} disabled={adviceLoading}>
-              {adviceLoading ? <><div className="spinner" /> Analysing...</> : 'Get Sweep Recommendation'}
+            <button className="btn btn-primary" onClick={handleSweepAdvice} disabled={sweepLoading}>
+              {sweepLoading ? <><div className="spinner" /> Analysing...</> : 'Get Sweep Recommendation'}
             </button>
             <button className="btn btn-ghost" onClick={() => setStep(1)}>Back</button>
           </div>
@@ -530,10 +584,10 @@ export default function PayDay() {
 
       {mode === 'sweep' && step === 3 && (
         <div>
-          {advice && (
+          {sweepAdvice && (
             <div className="advice-box">
-              <h3>Claude's Recommendation</h3>
-              {advice}
+              <h3>Sweep Recommendation</h3>
+              {sweepAdvice}
             </div>
           )}
 
@@ -559,7 +613,7 @@ export default function PayDay() {
                   <button className="btn btn-success" onClick={handleSweepConfirm} disabled={!sweepAmount || parseFloat(sweepAmount) <= 0}>
                     <CheckCircle size={16} /> Confirm Sweep
                   </button>
-                  <button className="btn btn-ghost" onClick={() => { setStep(2); setAdvice(null); }}>Back</button>
+                  <button className="btn btn-ghost" onClick={() => { setStep(2); setSweepAdvice(null); }}>Back</button>
                 </>
               )}
             </div>
@@ -604,9 +658,10 @@ export default function PayDay() {
                 {history.map(h => {
                   const offsetAmt = h.offset_transfer || 0;
                   const retainAmt = h.retention_amount || 0;
+                  const mortgageAmt = h.mortgage_contribution || 0;
                   const netAmt = h.net_amount || h.amount;
                   const hasGoals = h.goal_contributions && h.goal_contributions.length > 0;
-                  const isExtra = offsetAmt > netAmt * 0.5; // More than 50% to offset = highlighted
+                  const isExtra = offsetAmt > netAmt * 0.5;
                   return (
                     <div key={h.id} className={`pay-history-row ${isExtra ? 'pay-history-extra' : ''}`}>
                       <div className="pay-history-date">
@@ -629,6 +684,9 @@ export default function PayDay() {
                           )}
                           {retainAmt > 0 && (
                             <span className="pay-history-retain">Retained: {fmtMoney(retainAmt)}</span>
+                          )}
+                          {mortgageAmt > 0 && (
+                            <span className="pay-history-retain" style={{ color: 'var(--yellow)' }}>Mortgage: {fmtMoney(mortgageAmt)}</span>
                           )}
                         </div>
                         {hasGoals && (

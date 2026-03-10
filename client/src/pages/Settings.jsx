@@ -17,7 +17,8 @@ export default function Settings() {
     gross_income: user?.gross_income || '',
     super_rate: ((user?.super_rate || 0.115) * 100).toFixed(1),
     hecs_repayment_rate: ((user?.hecs_repayment_rate || 0) * 100).toFixed(1),
-    pay_cycle: user?.pay_cycle || 'fortnightly'
+    pay_cycle: user?.pay_cycle || 'fortnightly',
+    mortgage_contribution: user?.mortgage_contribution || ''
   });
   const [profileMsg, setProfileMsg] = useState('');
 
@@ -61,7 +62,8 @@ export default function Settings() {
         gross_income: parseFloat(profile.gross_income),
         super_rate: parseFloat(profile.super_rate) / 100,
         hecs_repayment_rate: parseFloat(profile.hecs_repayment_rate) / 100,
-        pay_cycle: profile.pay_cycle
+        pay_cycle: profile.pay_cycle,
+        mortgage_contribution: parseFloat(profile.mortgage_contribution) || 0
       });
       setProfileMsg('Profile updated!');
       setTimeout(() => setProfileMsg(''), 3000);
@@ -150,6 +152,13 @@ export default function Settings() {
               <div className="form-group">
                 <label>HECS Repayment Rate (%)</label>
                 <input className="form-input" type="number" step="0.1" value={profile.hecs_repayment_rate} onChange={e => setProfile({ ...profile, hecs_repayment_rate: e.target.value })} />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>Mortgage Contribution ($/month)</label>
+                <input className="form-input" type="number" step="1" value={profile.mortgage_contribution} onChange={e => setProfile({ ...profile, mortgage_contribution: e.target.value })} placeholder="e.g. 2857" />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>Your share of the monthly mortgage payment (auto-debited from offset on 25th)</div>
               </div>
             </div>
 

@@ -63,7 +63,8 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
       gross_income: user.gross_income,
       super_rate: user.super_rate,
       hecs_repayment_rate: user.hecs_repayment_rate,
-      pay_cycle: user.pay_cycle
+      pay_cycle: user.pay_cycle,
+      mortgage_contribution: user.mortgage_contribution || 0
     }
   });
 }));
@@ -86,14 +87,14 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/auth/profile', authMiddleware, asyncHandler(async (req, res) => {
-  const { display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle } = req.body;
+  const { display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution } = req.body;
   const db = await getDb();
   await db.query(
-    'UPDATE users SET display_name = COALESCE($1, display_name), gross_income = COALESCE($2, gross_income), super_rate = COALESCE($3, super_rate), hecs_repayment_rate = COALESCE($4, hecs_repayment_rate), pay_cycle = COALESCE($5, pay_cycle) WHERE id = $6',
-    [display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, req.user.id]
+    'UPDATE users SET display_name = COALESCE($1, display_name), gross_income = COALESCE($2, gross_income), super_rate = COALESCE($3, super_rate), hecs_repayment_rate = COALESCE($4, hecs_repayment_rate), pay_cycle = COALESCE($5, pay_cycle), mortgage_contribution = COALESCE($6, mortgage_contribution) WHERE id = $7',
+    [display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution, req.user.id]
   );
   const user = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
-  res.json({ id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, super_rate: user.super_rate, hecs_repayment_rate: user.hecs_repayment_rate, pay_cycle: user.pay_cycle });
+  res.json({ id: user.id, username: user.username, display_name: user.display_name, role: user.role, gross_income: user.gross_income, super_rate: user.super_rate, hecs_repayment_rate: user.hecs_repayment_rate, pay_cycle: user.pay_cycle, mortgage_contribution: user.mortgage_contribution || 0 });
 }));
 
 app.put('/api/auth/password', authMiddleware, asyncHandler(async (req, res) => {
@@ -574,6 +575,9 @@ app.get('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) 
   }
 
   if (profile.retention_method === 'fixed' && profile.fixed_amount > 0) {
+    const periodsPerYear = user.pay_cycle === 'weekly' ? 52 : user.pay_cycle === 'fortnightly' ? 26 : 12;
+    const mortgageMonthly = user.mortgage_contribution || 0;
+    const mortgagePerPeriod = mortgageMonthly * 12 / periodsPerYear;
     return res.json({
       user_id: userId,
       retention_method: 'fixed',
@@ -581,6 +585,8 @@ app.get('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) 
       avg_per_period: profile.fixed_amount,
       buffer_amount: 0,
       upcoming_extra: 0,
+      mortgage_per_period: Math.round(mortgagePerPeriod * 100) / 100,
+      mortgage_monthly: mortgageMonthly,
       lookback_weeks: profile.lookback_weeks,
       pay_period: user.pay_cycle,
       by_category: {},
@@ -616,14 +622,37 @@ app.get('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) 
   const byCategory = {};
   expenses.forEach(e => { byCategory[e.category] = Math.round(parseFloat(e.total) / periodsInLookback); });
 
-  const calculatedRetention = avgPerPeriod + bufferAmount + upcomingExtra;
+  // Conservative retention: max of spending-based and budget-based
+  const spendingBasedRetention = avgPerPeriod + bufferAmount;
+
+  // Budget-based retention: monthly budgets scaled to pay period
+  const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
+  const levers = (await db.query("SELECT * FROM levers WHERE active = 1 AND name LIKE '%Budget Scale%'")).rows;
+  const budgetScale = (levers[0]?.value || 100) / 100;
+  const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+  const budgetPerPeriod = totalMonthlyBudget * 12 / periodsPerYear;
+  const budgetBasedRetention = budgetPerPeriod;
+
+  // Use whichever is higher (more conservative) + upcoming
+  const baseRetention = Math.max(spendingBasedRetention, budgetBasedRetention);
+  const calculatedRetention = baseRetention + upcomingExtra;
+
+  // Mortgage contribution per pay period
+  const mortgageMonthly = user.mortgage_contribution || 0;
+  const mortgagePerPeriod = mortgageMonthly * 12 / periodsPerYear;
 
   res.json({
     user_id: userId,
     retention_method: 'auto',
+    mortgage_per_period: Math.round(mortgagePerPeriod * 100) / 100,
+    mortgage_monthly: mortgageMonthly,
     calculated_retention: Math.round(calculatedRetention * 100) / 100,
     avg_per_period: Math.round(avgPerPeriod * 100) / 100,
     buffer_amount: Math.round(bufferAmount * 100) / 100,
+    budget_per_period: Math.round(budgetPerPeriod * 100) / 100,
+    spending_based: Math.round(spendingBasedRetention * 100) / 100,
+    budget_based: Math.round(budgetBasedRetention * 100) / 100,
+    used_budget_floor: budgetBasedRetention > spendingBasedRetention,
     upcoming_extra: upcomingExtra,
     lookback_weeks: profile.lookback_weeks,
     expense_count: expenses.length,
@@ -657,7 +686,7 @@ app.put('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) 
 // ===================== PAYDAY COMPLETE (offset-centric) =====================
 
 app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) => {
-  const { net_amount, gross_amount, pay_date, pay_type, notes, retention_amount, offset_amount, goal_allocations } = req.body;
+  const { net_amount, gross_amount, pay_date, pay_type, notes, retention_amount, offset_amount, mortgage_contribution, goal_allocations } = req.body;
   const db = await getDb();
   const client = await db.connect();
 
@@ -666,8 +695,8 @@ app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) =
 
     // 1. Record income entry
     const incomeResult = await client.query(
-      'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
-      [req.user.id, gross_amount || net_amount, net_amount, pay_date, pay_type || 'regular', notes || null, retention_amount, offset_amount]
+      'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes, retention_amount, offset_transfer, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+      [req.user.id, gross_amount || net_amount, net_amount, pay_date, pay_type || 'regular', notes || null, retention_amount, offset_amount, mortgage_contribution || 0]
     );
     const incomeEntry = incomeResult.rows[0];
 
@@ -765,7 +794,8 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
   }
 
   // Get mortgage debit dates (23rd of each month in range)
-  const mortgage = 4656.64;
+  const allUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
+  const mortgage = allUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   const mortgageEvents = [];
   const start = new Date(startDate + 'T00:00:00');
   const end = new Date(endDate + 'T00:00:00');
@@ -813,7 +843,8 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
 // This function only creates record markers for the chart — it NEVER deducts from balance
 // for historical months. Only future 23rds (after the feature was enabled) will deduct.
 async function applyPendingMortgageDebits(db) {
-  const mortgage = 4656.64;
+  const allUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
+  const mortgage = allUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   const today = new Date();
 
   const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
@@ -1264,7 +1295,8 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   )).rows;
 
   // Mortgage events (23rd of month)
-  const mortgage14 = 4656.64;
+  const mortgUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
+  const mortgage14 = mortgUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   const mortgageDates = new Set();
   {
     const s = new Date(fourteenAgo + 'T00:00:00');
@@ -1375,7 +1407,8 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
   )).rows;
 
   // Mortgage events
-  const mortgageAmt = 4656.64;
+  const mortgUsers2 = (await db.query('SELECT mortgage_contribution FROM users')).rows;
+  const mortgageAmt = mortgUsers2.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   const mortgageDates = new Set();
   {
     const s = new Date(startDate + 'T00:00:00');
@@ -1493,7 +1526,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
   }
   const estimatedMonthlyIncome = totalAnnualNet / 12;
-  const mortgage = 4656.64;
+  const mortgage = users.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   // Offset-centric: mortgage debited from offset by bank, not subtracted from surplus
   const monthlySurplus = estimatedMonthlyIncome - (parseFloat(monthlyExpenses.total) || 0);
 
@@ -1650,7 +1683,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
 
   const monthlyNetIncome = totalAnnualNet / 12;
   const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
-  const mortgage = 4656.64;
+  const mortgage = users.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
   // Use pace-based expenses for projections
   const monthlySurplus = monthlyNetIncome - monthlyExpenseAtPace;
 

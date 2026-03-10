@@ -32,6 +32,7 @@ async function initSchema() {
       super_rate REAL NOT NULL DEFAULT 0.115,
       hecs_repayment_rate REAL NOT NULL DEFAULT 0,
       pay_cycle TEXT NOT NULL DEFAULT 'fortnightly',
+      mortgage_contribution REAL NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -186,7 +187,15 @@ async function initSchema() {
     await pool.query('ALTER TABLE savings_goals ADD COLUMN IF NOT EXISTS is_offset_bucket INTEGER NOT NULL DEFAULT 1');
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS retention_amount REAL');
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS offset_transfer REAL');
+    await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS mortgage_contribution REAL');
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS mortgage_contribution REAL NOT NULL DEFAULT 0');
   } catch (e) { /* columns may already exist */ }
+
+  // Set mortgage contributions if not yet set (Adam $2,857/mo, Aruto $1,800/mo)
+  try {
+    await pool.query("UPDATE users SET mortgage_contribution = 2857 WHERE username = 'adam' AND mortgage_contribution = 0");
+    await pool.query("UPDATE users SET mortgage_contribution = 1800 WHERE username = 'aruto' AND mortgage_contribution = 0");
+  } catch (e) { /* ignore */ }
 
   // Fix Aruto's gross income (was 70000, should be 95000 → ~$1,220/wk net)
   try {
@@ -214,14 +223,16 @@ async function initSchema() {
       const adamRow = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
       const arutoRow = (await pool.query("SELECT id FROM users WHERE username = 'aruto'")).rows[0];
       if (adamRow && arutoRow) {
-        // Aruto: ~$1,220/wk net, retains $770, sends $450 to offset — weekly since Jan 2026
+        // Aruto: ~$1,220/wk net, retains $770, mortgage $415.38/wk ($1800/mo), surplus $34.62/wk to offset
         const arutoWeeklyNet = 1220;
         const arutoRetention = 770;
-        const arutoOffset = 450;
-        // Adam: ~$3,914 fortnightly net, retains ~$1,400, sends ~$2,514 to offset
+        const arutoMortgage = Math.round(1800 * 12 / 52 * 100) / 100; // $415.38/wk
+        const arutoOffset = arutoWeeklyNet - arutoRetention; // $450 total to offset
+        // Adam: ~$3,914 fortnightly net, retains ~$1,400, mortgage $1,428.50/fn ($2857/mo), surplus ~$1,085.50/fn
         const adamFnNet = 3914;
         const adamRetention = 1400;
-        const adamOffset = 2514;
+        const adamMortgage = Math.round(2857 * 12 / 26 * 100) / 100; // $1,318.62/fn
+        const adamOffset = adamFnNet - adamRetention; // $2,514 total to offset
 
         const startDate = new Date('2026-01-06'); // First Monday after data start
         const today = new Date();
@@ -231,8 +242,8 @@ async function initSchema() {
         while (d <= today) {
           const dateStr = d.toISOString().split('T')[0];
           await pool.query(
-            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-            [arutoRow.id, arutoWeeklyNet, arutoWeeklyNet, dateStr, 'regular', arutoRetention, arutoOffset]
+            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [arutoRow.id, arutoWeeklyNet, arutoWeeklyNet, dateStr, 'regular', arutoRetention, arutoOffset, arutoMortgage]
           );
           d.setDate(d.getDate() + 7);
         }
@@ -242,8 +253,8 @@ async function initSchema() {
         while (d <= today) {
           const dateStr = d.toISOString().split('T')[0];
           await pool.query(
-            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-            [adamRow.id, adamFnNet, adamFnNet, dateStr, 'regular', adamRetention, adamOffset]
+            'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, retention_amount, offset_transfer, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+            [adamRow.id, adamFnNet, adamFnNet, dateStr, 'regular', adamRetention, adamOffset, adamMortgage]
           );
           d.setDate(d.getDate() + 14);
         }
@@ -264,12 +275,12 @@ async function initSchema() {
     const hash2 = bcrypt.hashSync('GoPies2023', 10);
 
     await pool.query(
-      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      ['adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly']
+      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+      ['adam', 'Adam', hash1, 'primary', 159000, 0.115, 0.06, 'fortnightly', 2857]
     );
     await pool.query(
-      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-      ['aruto', 'Aruto', hash2, 'partner', 95000, 0.115, 0.04, 'weekly']
+      'INSERT INTO users (username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+      ['aruto', 'Aruto', hash2, 'partner', 95000, 0.115, 0.04, 'weekly', 1800]
     );
 
     const user1Res = await pool.query('SELECT id FROM users WHERE username = $1', ['adam']);
