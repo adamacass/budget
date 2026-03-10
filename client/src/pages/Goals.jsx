@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getGoals, addGoal, updateGoal, deleteGoal, redistributeGoals, getLevers, addLever, updateLever, deleteLever, getBalances, getRetention, updateRetention } from '../api';
-import { Target, Sliders, Plus, Trash2, Edit3, Shield, RefreshCw } from 'lucide-react';
+import { getGoals, addGoal, updateGoal, deleteGoal, redistributeGoals, getLevers, addLever, updateLever, deleteLever, getBalances, getRetention, updateRetention, getGoalHistory } from '../api';
+import { Target, Sliders, Plus, Trash2, Edit3, Shield, RefreshCw, TrendingUp } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
+function fmtK(n) { return n >= 10000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
 const bucketColors = ['#6c5ce7', '#00cec9', '#fd79a8', '#fdcb6e', '#e17055', '#55efc4'];
 
 export default function Goals() {
@@ -20,11 +22,20 @@ export default function Goals() {
   const [redistributing, setRedistributing] = useState(false);
   const [redistAmounts, setRedistAmounts] = useState({});
   const [redistSaving, setRedistSaving] = useState(false);
+  const [goalHistory, setGoalHistory] = useState([]);
+  const [showChart, setShowChart] = useState(true);
+  const [visibleGoals, setVisibleGoals] = useState({});
 
   useEffect(() => {
     getGoals().then(setGoals).catch(console.error);
     getLevers().then(setLevers).catch(console.error);
     getBalances().then(setBalances).catch(console.error);
+    getGoalHistory().then(h => {
+      setGoalHistory(h);
+      const vis = {};
+      h.forEach(g => { vis[g.goal_id] = true; });
+      setVisibleGoals(vis);
+    }).catch(console.error);
     if (user) getRetention(user.id).then(setRetention).catch(console.error);
   }, [user]);
 
@@ -248,10 +259,66 @@ export default function Goals() {
           )}
 
           {!redistributing && goals.length > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowChart(!showChart)}>
+                <TrendingUp size={14} /> {showChart ? 'Hide' : 'Show'} Chart
+              </button>
               <button className="btn btn-ghost" onClick={startRedistribute}><RefreshCw size={14} /> Redistribute</button>
             </div>
           )}
+
+          {/* Goal Progression Chart */}
+          {showChart && goalHistory.length > 0 && !redistributing && (() => {
+            // Build unified chart data from all goal snapshots
+            const allWeeks = new Set();
+            goalHistory.forEach(g => g.snapshots.forEach(s => allWeeks.add(s.week)));
+            const weeks = [...allWeeks].sort();
+            const chartData = weeks.map(w => {
+              const point = { week: w.substring(5) };
+              goalHistory.forEach(g => {
+                if (!visibleGoals[g.goal_id]) return;
+                const snap = g.snapshots.filter(s => s.week <= w).pop();
+                point[g.name] = snap ? snap.amount : 0;
+              });
+              return point;
+            });
+            return (
+              <div className="card card-animate" style={{ marginBottom: '1rem' }}>
+                <div className="card-title"><TrendingUp size={14} /> Goal Progression</div>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                  {goalHistory.map((g, i) => (
+                    <button key={g.goal_id}
+                      className={`btn btn-sm ${visibleGoals[g.goal_id] ? '' : 'btn-ghost'}`}
+                      style={visibleGoals[g.goal_id] ? { background: bucketColors[i % bucketColors.length], color: '#fff', border: 'none', opacity: 1 } : { opacity: 0.5 }}
+                      onClick={() => setVisibleGoals(prev => ({ ...prev, [g.goal_id]: !prev[g.goal_id] }))}
+                    >
+                      {g.name}
+                    </button>
+                  ))}
+                </div>
+                <ResponsiveContainer width="100%" height={220}>
+                  <LineChart data={chartData}>
+                    <XAxis dataKey="week" tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+                    <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} tickFormatter={v => fmtK(v)} />
+                    <Tooltip
+                      contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: '0.8rem' }}
+                      formatter={(v, name) => [fmtMoney(v), name]}
+                    />
+                    {goalHistory.map((g, i) => visibleGoals[g.goal_id] && (
+                      <Line key={g.goal_id} type="stepAfter" dataKey={g.name}
+                        stroke={bucketColors[i % bucketColors.length]} strokeWidth={2.5}
+                        dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                    ))}
+                    {goalHistory.map((g, i) => visibleGoals[g.goal_id] && (
+                      <ReferenceLine key={`target-${g.goal_id}`} y={g.target_amount}
+                        stroke={bucketColors[i % bucketColors.length]} strokeDasharray="4 3" strokeWidth={1}
+                        label={{ value: `${g.name} target`, fill: bucketColors[i % bucketColors.length], fontSize: 9, position: 'right' }} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            );
+          })()}
 
           {goals.map((g, i) => {
             const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount * 100) : 0;

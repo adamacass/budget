@@ -22,6 +22,11 @@ export async function apiFetch(path, options = {}) {
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
     throw new Error(err.error || 'Request failed');
   }
+  // Auto-refresh: if server sends a new token, store it silently
+  const refreshedToken = res.headers.get('x-refreshed-token');
+  if (refreshedToken) {
+    localStorage.setItem('token', refreshedToken);
+  }
   const contentType = res.headers.get('content-type');
   if (contentType && contentType.includes('application/json')) {
     return res.json();
@@ -93,6 +98,7 @@ export const getOffsetContributions = () => apiFetch('/api/offset-contributions'
 
 // Goal Contributions
 export const getGoalContributions = (goalId) => apiFetch(`/api/goal-contributions/${goalId}`);
+export const getGoalHistory = () => apiFetch('/api/goal-history');
 
 // Claude AI
 export const getPayDayAdvice = (data) => apiFetch('/api/claude/payday-advice', { method: 'POST', body: JSON.stringify(data) });

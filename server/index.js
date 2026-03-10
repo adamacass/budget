@@ -813,6 +813,63 @@ app.get('/api/goal-contributions/:goalId', authMiddleware, asyncHandler(async (r
   res.json(rows);
 }));
 
+// ===================== GOAL HISTORY (time series for progression charts) =====================
+
+app.get('/api/goal-history', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const goals = (await db.query('SELECT id, name, target_amount, current_amount, created_at FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+
+  // Build time series from goal_contributions grouped by week
+  const history = [];
+  for (const goal of goals) {
+    const contributions = (await db.query(
+      `SELECT gc.amount, gc.contributed_at, gc.notes
+       FROM goal_contributions gc
+       WHERE gc.goal_id = $1
+       ORDER BY gc.contributed_at ASC`,
+      [goal.id]
+    )).rows;
+
+    // Build cumulative weekly snapshots
+    const weeklySnapshots = [];
+    let running = 0;
+    const byWeek = {};
+    for (const c of contributions) {
+      const d = new Date(c.contributed_at);
+      const weekStart = new Date(d);
+      const day = weekStart.getDay();
+      const diff = day === 0 ? 6 : day - 1;
+      weekStart.setDate(weekStart.getDate() - diff);
+      const key = weekStart.toISOString().split('T')[0];
+      if (!byWeek[key]) byWeek[key] = 0;
+      byWeek[key] = parseFloat(c.amount); // latest redistribution amount for that week
+    }
+
+    // Convert to cumulative series
+    const weeks = Object.keys(byWeek).sort();
+    for (const w of weeks) {
+      running = byWeek[w]; // redistributions set absolute amounts
+      weeklySnapshots.push({ week: w, amount: running });
+    }
+
+    // Add current state as latest point
+    const today = new Date().toISOString().split('T')[0];
+    if (weeklySnapshots.length === 0 || weeklySnapshots[weeklySnapshots.length - 1].week !== today) {
+      weeklySnapshots.push({ week: today, amount: goal.current_amount });
+    }
+
+    history.push({
+      goal_id: goal.id,
+      name: goal.name,
+      target_amount: goal.target_amount,
+      current_amount: goal.current_amount,
+      snapshots: weeklySnapshots
+    });
+  }
+
+  res.json(history);
+}));
+
 // ===================== PAYDAY EVENTS (for chart overlays) =====================
 
 app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
@@ -1557,6 +1614,17 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   }
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+
+  // Goal weekly change: compare current_amount with last week's contribution snapshot
+  for (const g of goals) {
+    const lastWeekContrib = (await db.query(
+      `SELECT amount FROM goal_contributions WHERE goal_id = $1 AND contributed_at >= NOW() - INTERVAL '14 days' ORDER BY contributed_at ASC LIMIT 1`,
+      [g.id]
+    )).rows[0];
+    g.prev_amount = lastWeekContrib ? parseFloat(lastWeekContrib.amount) : null;
+    g.weekly_change = g.prev_amount !== null ? g.current_amount - g.prev_amount : null;
+  }
+
   const users = (await db.query('SELECT id, display_name, gross_income, pay_cycle FROM users')).rows;
 
   // Budget data

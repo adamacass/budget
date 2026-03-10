@@ -646,11 +646,57 @@ export default function PayDay() {
           </div>
 
           <div className="btn-group" style={{ marginTop: '1rem' }}>
-            {saved ? (
-              <div className="success-msg" role="alert" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '1rem', background: 'var(--green-bg)', borderRadius: 8 }}>
-                <CheckCircle size={20} /> Pay recorded! {fmtMoney(totalToOffset)} sent to offset ({fmtMoney(mortgagePerPeriod)} mortgage reserve + {fmtMoney(trueSurplus)} surplus). Balances updated.
-              </div>
-            ) : (
+            {saved ? (() => {
+              // Compare with last pay
+              const myHistory = history.filter(h => h.user_id === user?.id && h.pay_type === 'regular');
+              const lastPay = myHistory.length > 1 ? myHistory[1] : myHistory[0];
+              const lastOffset = lastPay?.offset_transfer || 0;
+              const offsetDiff = totalToOffset - lastOffset;
+              const improved = offsetDiff > 0;
+              return (
+                <div className="payday-success-card card-animate" role="alert">
+                  <div className="corgi-celebration">
+                    <svg viewBox="0 0 64 64" width="56" height="56" className="corgi-svg corgi-bounce">
+                      <ellipse cx="32" cy="42" rx="18" ry="10" fill="#f0c36d" />
+                      <ellipse cx="48" cy="42" rx="6" ry="8" fill="#e8b85a" />
+                      <path d="M52 36 Q58 28 56 22" stroke="#d4a030" strokeWidth="3" fill="none" strokeLinecap="round" className="corgi-tail-wag" />
+                      <rect x="20" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+                      <rect x="28" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+                      <rect x="38" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+                      <rect x="44" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+                      <circle cx="16" cy="32" r="12" fill="#f0c36d" />
+                      <ellipse cx="8" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(-15 8 22)" />
+                      <ellipse cx="24" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(15 24 22)" />
+                      <ellipse cx="16" cy="36" rx="6" ry="5" fill="#fff5e0" />
+                      <circle cx="12" cy="30" r="2.5" fill="#2d3436" /><circle cx="20" cy="30" r="2.5" fill="#2d3436" />
+                      <circle cx="12.8" cy="29.2" r="0.8" fill="white" /><circle cx="20.8" cy="29.2" r="0.8" fill="white" />
+                      <ellipse cx="16" cy="35" rx="2" ry="1.5" fill="#2d3436" />
+                      <path d="M13 37 Q16 40 19 37" stroke="#2d3436" strokeWidth="1" fill="none" strokeLinecap="round" />
+                      <ellipse cx="16" cy="40" rx="2" ry="2.5" fill="#ff7675" />
+                    </svg>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--green)' }}>
+                        <CheckCircle size={18} style={{ verticalAlign: 'text-bottom' }} /> Pay recorded!
+                      </div>
+                      <div style={{ fontSize: '0.9rem', marginTop: 4 }}>
+                        {fmtMoney(totalToOffset)} sent to offset ({fmtMoney(mortgagePerPeriod)} mortgage + {fmtMoney(trueSurplus)} surplus)
+                      </div>
+                      {lastOffset > 0 && (
+                        <div style={{ fontSize: '0.82rem', marginTop: 6, color: improved ? 'var(--green)' : 'var(--yellow)' }}>
+                          {improved ? 'Up' : 'Down'} {fmtMoney(Math.abs(offsetDiff))} vs last pay ({fmtMoney(lastOffset)})
+                          {improved && ' \u2014 nice improvement!'}
+                        </div>
+                      )}
+                      {milestone && (
+                        <div className="milestone-pulse" style={{ marginTop: 8, padding: '0.4rem 0.75rem', background: 'rgba(108,92,231,0.15)', borderRadius: 8, fontWeight: 700, color: 'var(--accent)' }}>
+                          <Award size={16} /> Milestone: Offset hit {fmtMoneyShort(milestone)}!
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })() : (
               <>
                 <button className="btn btn-success" onClick={handleComplete} disabled={totalToOffset <= 0}
                   aria-label={`Confirm sending ${fmtMoney(totalToOffset)} to offset account`}>
@@ -729,8 +775,12 @@ export default function PayDay() {
 
             <div className="btn-group">
               {saved ? (
-                <div className="success-msg" role="alert" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <CheckCircle size={16} /> Swept {fmtMoney(parseFloat(sweepAmount))} to offset!
+                <div className="payday-success-card card-animate" role="alert" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '1rem', background: 'var(--green-bg)', borderRadius: 8, width: '100%' }}>
+                  <CheckCircle size={20} style={{ color: 'var(--green)', flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontWeight: 700, color: 'var(--green)' }}>Swept {fmtMoney(parseFloat(sweepAmount))} to offset!</div>
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: 2 }}>New balance: ~{fmtK((balances.offset || 0) + parseFloat(sweepAmount || 0))}</div>
+                  </div>
                 </div>
               ) : (
                 <>

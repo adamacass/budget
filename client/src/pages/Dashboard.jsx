@@ -113,7 +113,28 @@ export default function Dashboard() {
     setImporting(false);
   }
 
-  if (loading) return <div className="loading-page"><div className="spinner" /> Loading dashboard...</div>;
+  if (loading) return (
+    <div className="loading-page corgi-loading">
+      <svg viewBox="0 0 64 64" width="64" height="64" className="corgi-svg corgi-bounce">
+        <ellipse cx="32" cy="42" rx="18" ry="10" fill="#f0c36d" />
+        <ellipse cx="48" cy="42" rx="6" ry="8" fill="#e8b85a" />
+        <path d="M52 36 Q58 28 56 22" stroke="#d4a030" strokeWidth="3" fill="none" strokeLinecap="round" className="corgi-tail-wag" />
+        <rect x="20" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+        <rect x="28" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+        <rect x="38" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+        <rect x="44" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+        <circle cx="16" cy="32" r="12" fill="#f0c36d" />
+        <ellipse cx="8" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(-15 8 22)" />
+        <ellipse cx="24" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(15 24 22)" />
+        <ellipse cx="16" cy="36" rx="6" ry="5" fill="#fff5e0" />
+        <circle cx="12" cy="30" r="2.5" fill="#2d3436" /><circle cx="20" cy="30" r="2.5" fill="#2d3436" />
+        <circle cx="12.8" cy="29.2" r="0.8" fill="white" /><circle cx="20.8" cy="29.2" r="0.8" fill="white" />
+        <ellipse cx="16" cy="35" rx="2" ry="1.5" fill="#2d3436" />
+        <path d="M13 37 Q16 40 19 37" stroke="#2d3436" strokeWidth="1" fill="none" strokeLinecap="round" />
+      </svg>
+      <div style={{ marginTop: '0.75rem', color: 'var(--text-muted)' }}>Fetching your budget...</div>
+    </div>
+  );
   if (!data) return <div>Failed to load dashboard</div>;
 
   const estimatedIncome = data.estimated_monthly_income || 0;
@@ -232,12 +253,21 @@ export default function Dashboard() {
               )}
             </div>
             <div className="offset-bucket-legend">
-              {data.goals.map((g, i) => (
-                <span key={g.id} className="offset-bucket-tag" onClick={() => navigate('/goals')}>
-                  <span className="offset-bucket-dot" style={{ background: bucketColors[i % bucketColors.length] }} />
-                  {g.name} <strong>{fmtK(g.current_amount)}</strong>
-                </span>
-              ))}
+              {data.goals.map((g, i) => {
+                const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount * 100) : 0;
+                return (
+                  <span key={g.id} className="offset-bucket-tag" onClick={() => navigate('/goals')}>
+                    <span className="offset-bucket-dot" style={{ background: bucketColors[i % bucketColors.length] }} />
+                    {g.name} <strong>{fmtK(g.current_amount)}</strong>
+                    <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>({pct.toFixed(0)}%)</span>
+                    {g.weekly_change !== null && g.weekly_change !== 0 && (
+                      <span className={`goal-change-badge ${g.weekly_change > 0 ? 'positive' : 'negative'}`}>
+                        {g.weekly_change > 0 ? '+' : ''}{fmtK(g.weekly_change)}
+                      </span>
+                    )}
+                  </span>
+                );
+              })}
               {unallocatedOffset > 0 && (
                 <span className="offset-bucket-tag">
                   <span className="offset-bucket-dot" style={{ background: 'var(--text-muted)', opacity: 0.4 }} />
@@ -561,21 +591,28 @@ export default function Dashboard() {
 
       {/* ===== SAVINGS GOALS ===== */}
       {data.goals?.length > 0 && (
-        <div className="card" onClick={() => navigate('/goals')} style={{ cursor: 'pointer' }}>
+        <div className="card card-animate" onClick={() => navigate('/goals')} style={{ cursor: 'pointer' }}>
           <div className="card-title"><Target size={14} /> Offset Goals</div>
           {data.goals.map((g, i) => {
             const pct = g.target_amount > 0 ? Math.min(100, (g.current_amount / g.target_amount) * 100) : 0;
+            const isMilestone = pct >= 100;
             return (
               <div key={g.id} style={{ marginBottom: '0.75rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.25rem' }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: bucketColors[i % bucketColors.length], display: 'inline-block' }} />
                     <span style={{ fontWeight: 600 }}>{g.name}</span>
+                    {g.weekly_change !== null && g.weekly_change > 0 && (
+                      <span className="goal-change-badge positive" style={{ fontSize: '0.7rem' }}>+{fmtK(g.weekly_change)}</span>
+                    )}
                   </span>
-                  <span style={{ color: 'var(--text-muted)' }}>{fmtMoney(g.current_amount)} / {fmtMoney(g.target_amount)} ({pct.toFixed(0)}%)</span>
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {fmtMoney(g.current_amount)} / {fmtMoney(g.target_amount)}
+                    <span style={{ fontWeight: 600, color: isMilestone ? 'var(--green)' : 'inherit', marginLeft: 4 }}>({pct.toFixed(0)}%){isMilestone && ' \u2713'}</span>
+                  </span>
                 </div>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${pct}%`, background: bucketColors[i % bucketColors.length] }} />
+                <div className={`progress-bar${isMilestone ? ' milestone-pulse' : ''}`}>
+                  <div className="progress-fill progress-fill-animate" style={{ width: `${pct}%`, background: bucketColors[i % bucketColors.length] }} />
                 </div>
               </div>
             );
