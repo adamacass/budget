@@ -1673,17 +1673,16 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
 
-  // Goal weekly change: compare current_amount with last week's contribution snapshot
+  // Goal weekly change: sum of contributions added to this bucket in the last 7 days
   for (const g of goals) {
-    const lastWeekContrib = (await db.query(
-      `SELECT amount FROM goal_contributions WHERE goal_id = $1 AND contributed_at >= NOW() - INTERVAL '14 days' ORDER BY contributed_at ASC LIMIT 1`,
+    const weekContribs = (await db.query(
+      `SELECT COALESCE(SUM(amount), 0) as net_change FROM goal_contributions WHERE goal_id = $1 AND contributed_at >= NOW() - INTERVAL '7 days'`,
       [g.id]
     )).rows[0];
-    g.prev_amount = lastWeekContrib ? parseFloat(lastWeekContrib.amount) : null;
-    g.weekly_change = g.prev_amount !== null ? g.current_amount - g.prev_amount : null;
+    g.weekly_change = parseFloat(weekContribs.net_change) || 0;
   }
 
-  const users = (await db.query('SELECT id, display_name, gross_income, pay_cycle FROM users')).rows;
+  const users = (await db.query('SELECT id, display_name, gross_income, pay_cycle, mortgage_contribution FROM users')).rows;
 
   // Budget data
   const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
