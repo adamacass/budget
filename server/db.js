@@ -730,6 +730,99 @@ async function seedStatementData() {
     );
     console.log('Seeded savings goals');
   }
+
+  // Seed historical goal_contributions from income_entries so chart has real data
+  try {
+    const contribCount = (await pool.query('SELECT COUNT(*) as cnt FROM goal_contributions')).rows[0];
+    if (parseInt(contribCount.cnt) === 0) {
+      const activeGoals = (await pool.query('SELECT id, name, current_amount, priority, created_at FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+      const incomeRows = (await pool.query('SELECT id, user_id, pay_date, offset_transfer, mortgage_contribution FROM income_entries ORDER BY pay_date ASC')).rows;
+      if (activeGoals.length > 0 && incomeRows.length > 0) {
+        // Determine proportional split based on current amounts (or equal if all zero)
+        const totalCurrent = activeGoals.reduce((s, g) => s + (g.current_amount || 0), 0);
+        const goalShares = activeGoals.map(g => {
+          if (totalCurrent > 0) return (g.current_amount || 0) / totalCurrent;
+          return 1 / activeGoals.length;
+        });
+
+        // Total offset growth from all income entries
+        const totalOffsetIn = incomeRows.reduce((s, r) => s + (r.offset_transfer || 0), 0);
+
+        // Monthly mortgage total (all users combined)
+        const users = (await pool.query('SELECT id, mortgage_contribution FROM users')).rows;
+        const monthlyMortgage = users.reduce((s, u) => s + (u.mortgage_contribution || 0), 0);
+
+        // Walk through pay dates, accumulate contributions per goal
+        const goalRunning = {};
+        activeGoals.forEach(g => { goalRunning[g.id] = 0; });
+        let lastMortgageMonth = null;
+
+        // Group income by pay_date to handle combined household income
+        const byDate = {};
+        for (const inc of incomeRows) {
+          if (!byDate[inc.pay_date]) byDate[inc.pay_date] = [];
+          byDate[inc.pay_date].push(inc);
+        }
+        const dates = Object.keys(byDate).sort();
+
+        for (const dateStr of dates) {
+          const entries = byDate[dateStr];
+          const dayOffset = entries.reduce((s, e) => s + (e.offset_transfer || 0), 0);
+
+          // Allocate this pay's offset transfer proportionally to goals
+          if (dayOffset > 0) {
+            for (let i = 0; i < activeGoals.length; i++) {
+              const goal = activeGoals[i];
+              const amount = Math.round(dayOffset * goalShares[i] * 100) / 100;
+              if (amount > 0) {
+                goalRunning[goal.id] += amount;
+                await pool.query(
+                  "INSERT INTO goal_contributions (goal_id, user_id, amount, income_entry_id, notes, contributed_at) VALUES ($1, $2, $3, $4, $5, $6::timestamptz)",
+                  [goal.id, entries[0].user_id, amount, entries[0].id, 'PayDay contribution', dateStr + 'T12:00:00Z']
+                );
+              }
+            }
+          }
+
+          // Check if mortgage deduction should happen (23rd of each month)
+          const d = new Date(dateStr);
+          const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+          if (d.getDate() >= 23 && lastMortgageMonth !== monthKey && monthlyMortgage > 0) {
+            lastMortgageMonth = monthKey;
+            const totalInBuckets = Object.values(goalRunning).reduce((s, v) => s + v, 0);
+            if (totalInBuckets > 0) {
+              const mortgageDate = `${monthKey}-23T12:00:00Z`;
+              for (const goal of activeGoals) {
+                const share = goalRunning[goal.id] / totalInBuckets;
+                const deduction = Math.round(monthlyMortgage * share * 100) / 100;
+                goalRunning[goal.id] = Math.max(0, goalRunning[goal.id] - deduction);
+                if (deduction > 0) {
+                  await pool.query(
+                    "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
+                    [goal.id, entries[0].user_id, -deduction, 'Mortgage deduction', mortgageDate]
+                  );
+                }
+              }
+            }
+          }
+        }
+
+        // Adjust final running totals to match current_amount (small correction contribution)
+        for (const goal of activeGoals) {
+          const diff = (goal.current_amount || 0) - goalRunning[goal.id];
+          if (Math.abs(diff) > 0.01) {
+            const lastDate = dates[dates.length - 1] || new Date().toISOString().split('T')[0];
+            await pool.query(
+              "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
+              [goal.id, userId, diff, 'Balance adjustment', lastDate + 'T18:00:00Z']
+            );
+          }
+        }
+
+        console.log('Seeded historical goal contributions from income entries');
+      }
+    }
+  } catch (e) { console.error('Goal contributions seed error:', e.message); }
 }
 
 async function getCategoryRules() {

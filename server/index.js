@@ -718,8 +718,8 @@ app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) =
       for (const ga of goal_allocations) {
         if (ga.amount > 0) {
           await client.query(
-            'INSERT INTO goal_contributions (goal_id, user_id, amount, income_entry_id, notes) VALUES ($1, $2, $3, $4, $5)',
-            [ga.goal_id, req.user.id, ga.amount, incomeEntry.id, ga.notes || 'PayDay contribution']
+            'INSERT INTO goal_contributions (goal_id, user_id, amount, income_entry_id, notes, contributed_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()))',
+            [ga.goal_id, req.user.id, ga.amount, incomeEntry.id, ga.notes || 'PayDay contribution', pay_date ? pay_date + 'T12:00:00Z' : null]
           );
           await client.query(
             'UPDATE savings_goals SET current_amount = current_amount + $1 WHERE id = $2',
@@ -819,7 +819,7 @@ app.get('/api/goal-history', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const goals = (await db.query('SELECT id, name, target_amount, current_amount, created_at FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
 
-  // Build time series from goal_contributions grouped by week
+  // Build event-driven time series from goal_contributions
   const history = [];
   for (const goal of goals) {
     const contributions = (await db.query(
@@ -830,32 +830,67 @@ app.get('/api/goal-history', authMiddleware, asyncHandler(async (req, res) => {
       [goal.id]
     )).rows;
 
-    // Build cumulative weekly snapshots
-    const weeklySnapshots = [];
+    // Build cumulative snapshots — each contribution is an event (can be +/-)
+    const snapshots = [];
     let running = 0;
-    const byWeek = {};
+
+    // Group events by date for cleaner data points
+    const byDate = {};
     for (const c of contributions) {
-      const d = new Date(c.contributed_at);
-      const weekStart = new Date(d);
-      const day = weekStart.getDay();
-      const diff = day === 0 ? 6 : day - 1;
-      weekStart.setDate(weekStart.getDate() - diff);
-      const key = weekStart.toISOString().split('T')[0];
-      if (!byWeek[key]) byWeek[key] = 0;
-      byWeek[key] = parseFloat(c.amount); // latest redistribution amount for that week
+      const dateStr = new Date(c.contributed_at).toISOString().split('T')[0];
+      if (!byDate[dateStr]) byDate[dateStr] = { adds: 0, deducts: 0, notes: [] };
+      const amt = parseFloat(c.amount);
+      if (c.notes === 'Redistribution') {
+        // Redistribution sets absolute — take last redistribution on that date
+        byDate[dateStr].redistribution = amt;
+        byDate[dateStr].notes.push('redistribution');
+      } else if (amt < 0) {
+        byDate[dateStr].deducts += amt;
+        byDate[dateStr].notes.push(c.notes || 'deduction');
+      } else {
+        byDate[dateStr].adds += amt;
+        byDate[dateStr].notes.push(c.notes || 'contribution');
+      }
     }
 
-    // Convert to cumulative series
-    const weeks = Object.keys(byWeek).sort();
-    for (const w of weeks) {
-      running = byWeek[w]; // redistributions set absolute amounts
-      weeklySnapshots.push({ week: w, amount: running });
+    const dates = Object.keys(byDate).sort();
+    for (const dateStr of dates) {
+      const ev = byDate[dateStr];
+      const prevRunning = running;
+      if (ev.redistribution !== undefined) {
+        // Redistribution sets absolute amount
+        running = ev.redistribution;
+      } else {
+        running += ev.adds + ev.deducts;
+      }
+      running = Math.max(0, running);
+
+      // Determine event type for labeling
+      let eventType = 'contribution';
+      if (ev.notes.includes('redistribution')) eventType = 'redistribution';
+      else if (ev.deducts < 0 && ev.adds === 0) eventType = 'mortgage';
+      else if (ev.deducts < 0) eventType = 'mixed';
+
+      snapshots.push({
+        week: dateStr,
+        amount: Math.round(running * 100) / 100,
+        event: eventType,
+        delta: Math.round((running - prevRunning) * 100) / 100
+      });
     }
 
-    // Add current state as latest point
+    // Add current state as latest point if not already there
     const today = new Date().toISOString().split('T')[0];
-    if (weeklySnapshots.length === 0 || weeklySnapshots[weeklySnapshots.length - 1].week !== today) {
-      weeklySnapshots.push({ week: today, amount: goal.current_amount });
+    if (snapshots.length === 0 || snapshots[snapshots.length - 1].week !== today) {
+      snapshots.push({ week: today, amount: goal.current_amount, event: 'current', delta: 0 });
+    }
+
+    // If only 1 point (today), add goal creation date as starting point
+    if (snapshots.length === 1) {
+      const createdDate = goal.created_at ? new Date(goal.created_at).toISOString().split('T')[0] : today;
+      if (createdDate !== today) {
+        snapshots.unshift({ week: createdDate, amount: 0, event: 'created', delta: 0 });
+      }
     }
 
     history.push({
@@ -863,7 +898,7 @@ app.get('/api/goal-history', authMiddleware, asyncHandler(async (req, res) => {
       name: goal.name,
       target_amount: goal.target_amount,
       current_amount: goal.current_amount,
-      snapshots: weeklySnapshots
+      snapshots
     });
   }
 
@@ -989,6 +1024,29 @@ async function applyPendingMortgageDebits(db) {
           "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit (historical)')",
           [userId, -mortgage, dateStr]
         );
+
+        // Also record proportional mortgage deductions against goal buckets
+        const goals = (await db.query('SELECT id, current_amount FROM savings_goals WHERE active = 1')).rows;
+        const totalInBuckets = goals.reduce((s, g) => s + (g.current_amount || 0), 0);
+        if (totalInBuckets > 0) {
+          // Check if goal mortgage contributions already exist for this date
+          const existingContrib = (await db.query(
+            "SELECT id FROM goal_contributions WHERE notes = 'Mortgage deduction' AND contributed_at::date = $1::date LIMIT 1",
+            [dateStr]
+          )).rows[0];
+          if (!existingContrib) {
+            for (const goal of goals) {
+              const share = (goal.current_amount || 0) / totalInBuckets;
+              const deduction = Math.round(mortgage * share * 100) / 100;
+              if (deduction > 0) {
+                await db.query(
+                  "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
+                  [goal.id, userId, -deduction, 'Mortgage deduction', dateStr + 'T12:00:00Z']
+                );
+              }
+            }
+          }
+        }
       }
     }
   }

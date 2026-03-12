@@ -269,19 +269,60 @@ export default function Goals() {
 
           {/* Goal Progression Chart */}
           {showChart && goalHistory.length > 0 && !redistributing && (() => {
-            // Build unified chart data from all goal snapshots
-            const allWeeks = new Set();
-            goalHistory.forEach(g => g.snapshots.forEach(s => allWeeks.add(s.week)));
-            const weeks = [...allWeeks].sort();
-            const chartData = weeks.map(w => {
-              const point = { week: w.substring(5) };
+            // Build unified chart data from all goal snapshots (event-driven)
+            const allDates = new Set();
+            const eventMap = {}; // date -> { events }
+            goalHistory.forEach(g => g.snapshots.forEach(s => {
+              allDates.add(s.week);
+              if (!eventMap[s.week]) eventMap[s.week] = [];
+              eventMap[s.week].push({ goal: g.name, event: s.event, delta: s.delta });
+            }));
+            const dates = [...allDates].sort();
+            const chartData = dates.map(d => {
+              const point = { date: d, label: d.substring(5) };
+              // Check if any event on this date is a mortgage deduction
+              const evts = eventMap[d] || [];
+              const hasMortgage = evts.some(e => e.event === 'mortgage');
+              point._hasMortgage = hasMortgage;
+              point._events = evts;
               goalHistory.forEach(g => {
                 if (!visibleGoals[g.goal_id]) return;
-                const snap = g.snapshots.filter(s => s.week <= w).pop();
+                const snap = g.snapshots.filter(s => s.week <= d).pop();
                 point[g.name] = snap ? snap.amount : 0;
               });
               return point;
             });
+
+            const CustomTooltip = ({ active, payload, label }) => {
+              if (!active || !payload?.length) return null;
+              const point = payload[0]?.payload;
+              const evts = point?._events || [];
+              return (
+                <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.5rem 0.75rem', fontSize: '0.75rem' }}>
+                  <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--text)' }}>{point?.date}</div>
+                  {payload.map((p, i) => (
+                    <div key={i} style={{ color: p.color, display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                      <span>{p.name}</span>
+                      <span style={{ fontWeight: 600 }}>{fmtMoney(p.value)}</span>
+                    </div>
+                  ))}
+                  {evts.length > 0 && (
+                    <div style={{ marginTop: 4, borderTop: '1px solid var(--border)', paddingTop: 4, color: '#8b8fa3', fontSize: '0.65rem' }}>
+                      {evts.map((e, i) => (
+                        <div key={i}>
+                          {e.event === 'mortgage' ? '🏠 Mortgage deduction' :
+                           e.event === 'redistribution' ? '🔄 Redistribution' :
+                           e.event === 'contribution' ? '💰 PayDay' :
+                           e.event === 'created' ? '✨ Created' : ''}
+                          {e.delta ? ` (${e.delta > 0 ? '+' : ''}${fmtMoney(e.delta)})` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            };
+
             return (
               <div className="card card-animate" style={{ marginBottom: '1rem' }}>
                 <div className="card-title"><TrendingUp size={14} /> Goal Progression</div>
@@ -296,18 +337,28 @@ export default function Goals() {
                     </button>
                   ))}
                 </div>
-                <ResponsiveContainer width="100%" height={220}>
+                <ResponsiveContainer width="100%" height={240}>
                   <LineChart data={chartData}>
-                    <XAxis dataKey="week" tick={{ fill: '#8b8fa3', fontSize: 10 }} />
+                    <XAxis dataKey="label" tick={{ fill: '#8b8fa3', fontSize: 10 }} />
                     <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} tickFormatter={v => fmtK(v)} />
-                    <Tooltip
-                      contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: '0.8rem' }}
-                      formatter={(v, name) => [fmtMoney(v), name]}
-                    />
+                    <Tooltip content={<CustomTooltip />} />
                     {goalHistory.map((g, i) => visibleGoals[g.goal_id] && (
-                      <Line key={g.goal_id} type="stepAfter" dataKey={g.name}
+                      <Line key={g.goal_id} type="monotone" dataKey={g.name}
                         stroke={bucketColors[i % bucketColors.length]} strokeWidth={2.5}
-                        dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                        dot={(props) => {
+                          const { cx, cy, payload } = props;
+                          const evts = payload?._events || [];
+                          const isMortgage = evts.some(e => e.event === 'mortgage' && e.goal === g.name);
+                          if (isMortgage) {
+                            return <circle key={props.key} cx={cx} cy={cy} r={5} fill="#e17055" stroke="#fff" strokeWidth={1.5} />;
+                          }
+                          const isRedist = evts.some(e => e.event === 'redistribution' && e.goal === g.name);
+                          if (isRedist) {
+                            return <rect key={props.key} x={cx - 4} y={cy - 4} width={8} height={8} fill={bucketColors[i % bucketColors.length]} stroke="#fff" strokeWidth={1} />;
+                          }
+                          return <circle key={props.key} cx={cx} cy={cy} r={3} fill={bucketColors[i % bucketColors.length]} stroke="none" />;
+                        }}
+                        activeDot={{ r: 6 }} />
                     ))}
                     {goalHistory.map((g, i) => visibleGoals[g.goal_id] && (
                       <ReferenceLine key={`target-${g.goal_id}`} y={g.target_amount}
@@ -316,6 +367,11 @@ export default function Goals() {
                     ))}
                   </LineChart>
                 </ResponsiveContainer>
+                <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', fontSize: '0.65rem', color: '#8b8fa3', marginTop: '0.25rem' }}>
+                  <span>● PayDay</span>
+                  <span style={{ color: '#e17055' }}>● Mortgage</span>
+                  <span>■ Redistribution</span>
+                </div>
               </div>
             );
           })()}
