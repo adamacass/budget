@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getDashboard, getInsights, addExpense, extractScreenshot, importScreenshot, getDailySpending } from '../api';
 import { useAuth } from '../context/AuthContext';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area, ReferenceArea } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ReferenceLine, AreaChart, Area, ReferenceArea, LineChart, Line, CartesianGrid } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Zap, TrendingUp, Users, DollarSign, AlertTriangle, CheckCircle, ArrowUpRight, Camera, Upload, X, Target, Shield } from 'lucide-react';
 import { CATEGORIES, getCategoryColor, getUserColor, getUserClass } from '../categoryColors';
@@ -278,6 +278,47 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* ===== OFFSET BALANCE OVER TIME ===== */}
+      {data.offset_history?.length > 1 && (
+        <div className="card offset-history-card">
+          <div className="card-header" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <TrendingUp size={16} />
+            <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>Offset Balance Over Time</span>
+          </div>
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={data.offset_history} margin={{ top: 5, right: 10, bottom: 0, left: 10 }}>
+              <defs>
+                <linearGradient id="offsetGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.3} />
+                  <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 10, fill: 'var(--text-muted)' }}
+                tickFormatter={d => { const [,m,day] = d.split('-'); return `${parseInt(day)}/${parseInt(m)}`; }}
+                axisLine={false} tickLine={false}
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: 'var(--text-muted)' }}
+                tickFormatter={v => v >= 1000 ? `$${(v / 1000).toFixed(0)}k` : `$${v}`}
+                axisLine={false} tickLine={false}
+                width={45}
+                domain={['dataMin - 1000', 'dataMax + 1000']}
+              />
+              <Tooltip
+                contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '0.8rem' }}
+                formatter={(val) => [fmtMoney2(val), 'Balance']}
+                labelFormatter={d => { const [y,m,day] = d.split('-'); return `${parseInt(day)}/${parseInt(m)}/${y}`; }}
+              />
+              <Area type="monotone" dataKey="balance" stroke="var(--accent)" strokeWidth={2} fill="url(#offsetGrad)" dot={false} activeDot={{ r: 4, fill: 'var(--accent)' }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* ===== ARUTO BANNER ===== */}
       {user?.username === 'aruto' && !dismissedBanner && (

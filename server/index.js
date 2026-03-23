@@ -1720,6 +1720,13 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   // Offset-centric: mortgage debited from offset by bank, not subtracted from surplus
   const monthlySurplus = estimatedMonthlyIncome - (parseFloat(monthlyExpenses.total) || 0);
 
+  // Offset balance history: one data point per day (latest snapshot each day)
+  const offsetHistory = (await db.query(
+    `SELECT DISTINCT ON (updated_at::date) updated_at::date as date, balance
+     FROM account_balances WHERE account_type = 'offset'
+     ORDER BY updated_at::date, updated_at DESC`
+  )).rows.map(r => ({ date: r.date.toISOString().split('T')[0], balance: parseFloat(r.balance) }));
+
   res.json({
     monthly_expenses: parseFloat(monthlyExpenses.total) || 0,
     weekly_expenses: parseFloat(weeklyExpenses.total) || 0,
@@ -1735,7 +1742,8 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
     weekly_budget: Math.round(weeklyBudget),
-    budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) }))
+    budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) })),
+    offset_history: offsetHistory
   });
 }));
 
