@@ -1001,8 +1001,7 @@ async function applyPendingMortgageDebits(db) {
   const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
   const userId = admin?.id || 1;
 
-
-  // Ensure all past 23rds have a historical marker (for chart display only — no balance deduction)
+  // Process each past 23rd: ensure fund_allocation, account_balance deduction, and goal deductions all exist
   for (let y = 2026; y <= today.getFullYear(); y++) {
     for (let m = 0; m < 12; m++) {
       const debitDate = new Date(y, m, 23);
@@ -1010,49 +1009,68 @@ async function applyPendingMortgageDebits(db) {
       const dateStr = debitDate.toISOString().split('T')[0];
       if (dateStr < '2026-01-01') continue;
 
-      const existing = (await db.query(
+      // 1. Ensure fund_allocation marker exists
+      const existingAlloc = (await db.query(
         "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes LIKE 'Mortgage%' AND allocated_date = $1",
         [dateStr]
       )).rows[0];
-
-      if (!existing) {
+      if (!existingAlloc) {
         await db.query(
           "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
           [userId, -mortgage, dateStr]
         );
+      }
 
-        // Deduct the mortgage payment from the offset balance
-        const curBal = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-        if (curBal) {
-          const newBal = Math.round((curBal.balance - mortgage) * 100) / 100;
-          await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [newBal, userId]);
-          console.log(`Mortgage auto-debit ${dateStr}: deducted $${mortgage} from offset, new balance $${newBal}`);
+      // 2. Ensure account_balances has a deduction snapshot for this date
+      // Look for a balance drop on this date (mortgage debit marker)
+      const balOnDate = (await db.query(
+        "SELECT id FROM account_balances WHERE account_type = 'offset' AND updated_at::date = $1::date AND balance < (SELECT balance FROM account_balances WHERE account_type = 'offset' AND updated_at < $1::date ORDER BY updated_at DESC LIMIT 1) LIMIT 1",
+        [dateStr]
+      )).rows[0];
+      if (!balOnDate) {
+        // Get the balance just before this date
+        const preBal = (await db.query(
+          "SELECT balance FROM account_balances WHERE account_type = 'offset' AND updated_at <= $1::timestamptz ORDER BY updated_at DESC LIMIT 1",
+          [dateStr + 'T11:59:59Z']
+        )).rows[0];
+        if (preBal) {
+          const newBal = Math.round((preBal.balance - mortgage) * 100) / 100;
+          // Only insert if the deduction hasn't already been reflected
+          const existingSnap = (await db.query(
+            "SELECT id FROM account_balances WHERE account_type = 'offset' AND updated_at::date = $1::date",
+            [dateStr]
+          )).rows[0];
+          if (!existingSnap) {
+            await db.query(
+              "INSERT INTO account_balances (account_type, balance, updated_by, updated_at) VALUES ('offset', $1, $2, $3::timestamptz)",
+              [newBal, userId, dateStr + 'T12:00:00Z']
+            );
+            console.log(`Mortgage auto-debit ${dateStr}: deducted $${mortgage} from offset, new balance $${newBal}`);
+          }
         }
+      }
 
-        // Also record proportional mortgage deductions against goal buckets
+      // 3. Ensure goal deductions exist
+      const existingContrib = (await db.query(
+        "SELECT id FROM goal_contributions WHERE notes = 'Mortgage deduction' AND contributed_at::date = $1::date LIMIT 1",
+        [dateStr]
+      )).rows[0];
+      if (!existingContrib) {
         const goals = (await db.query('SELECT id, current_amount FROM savings_goals WHERE active = 1')).rows;
         const totalInBuckets = goals.reduce((s, g) => s + (g.current_amount || 0), 0);
         if (totalInBuckets > 0) {
-          // Check if goal mortgage contributions already exist for this date
-          const existingContrib = (await db.query(
-            "SELECT id FROM goal_contributions WHERE notes = 'Mortgage deduction' AND contributed_at::date = $1::date LIMIT 1",
-            [dateStr]
-          )).rows[0];
-          if (!existingContrib) {
-            for (const goal of goals) {
-              const share = (goal.current_amount || 0) / totalInBuckets;
-              const deduction = Math.round(mortgage * share * 100) / 100;
-              if (deduction > 0) {
-                await db.query(
-                  "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
-                  [goal.id, userId, -deduction, 'Mortgage deduction', dateStr + 'T12:00:00Z']
-                );
-                // Also reduce the goal's current_amount
-                await db.query(
-                  "UPDATE savings_goals SET current_amount = GREATEST(0, current_amount - $1) WHERE id = $2",
-                  [deduction, goal.id]
-                );
-              }
+          for (const goal of goals) {
+            const share = (goal.current_amount || 0) / totalInBuckets;
+            const deduction = Math.round(mortgage * share * 100) / 100;
+            if (deduction > 0) {
+              await db.query(
+                "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
+                [goal.id, userId, -deduction, 'Mortgage deduction', dateStr + 'T12:00:00Z']
+              );
+              await db.query(
+                "UPDATE savings_goals SET current_amount = GREATEST(0, current_amount - $1) WHERE id = $2",
+                [deduction, goal.id]
+              );
             }
           }
         }
