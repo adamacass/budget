@@ -18,6 +18,15 @@ function clampDate(date) { return date < DATA_START_DATE ? DATA_START_DATE : dat
 // Wrap async route handlers so unhandled rejections return 500 instead of crashing
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// Centralised mortgage amount — single source of truth from levers table
+async function getMortgageMonthly(db) {
+  const lever = (await db.query("SELECT value FROM levers WHERE name = 'Mortgage Monthly' AND active = 1 LIMIT 1")).rows[0];
+  if (lever) return parseFloat(lever.value);
+  // Fallback: sum per-user contributions
+  const row = (await db.query('SELECT SUM(mortgage_contribution) as total FROM users')).rows[0];
+  return parseFloat(row?.total) || 0;
+}
+
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
@@ -939,8 +948,7 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
   }
 
   // Get mortgage debit dates (23rd of each month in range)
-  const allUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
-  const mortgage = allUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgage = await getMortgageMonthly(db);
   const mortgageEvents = [];
   const start = new Date(startDate + 'T00:00:00');
   const end = new Date(endDate + 'T00:00:00');
@@ -987,8 +995,7 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
 // On each 23rd, deducts the mortgage amount from the offset balance and
 // proportionally reduces each savings goal bucket.
 async function applyPendingMortgageDebits(db) {
-  const allUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
-  const mortgage = allUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgage = await getMortgageMonthly(db);
   const today = new Date();
 
   const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
@@ -1465,8 +1472,7 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   )).rows;
 
   // Mortgage events (23rd of month)
-  const mortgUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
-  const mortgage14 = mortgUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgage14 = await getMortgageMonthly(db);
   const mortgageDates = new Set();
   {
     const s = new Date(fourteenAgo + 'T00:00:00');
@@ -1577,8 +1583,7 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
   )).rows;
 
   // Mortgage events
-  const mortgUsers2 = (await db.query('SELECT mortgage_contribution FROM users')).rows;
-  const mortgageAmt = mortgUsers2.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgageAmt = await getMortgageMonthly(db);
   const mortgageDates = new Set();
   {
     const s = new Date(startDate + 'T00:00:00');
@@ -1716,7 +1721,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
   }
   const estimatedMonthlyIncome = totalAnnualNet / 12;
-  const mortgage = users.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgage = await getMortgageMonthly(db);
   // Offset-centric: mortgage debited from offset by bank, not subtracted from surplus
   const monthlySurplus = estimatedMonthlyIncome - (parseFloat(monthlyExpenses.total) || 0);
 
@@ -1881,7 +1886,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
 
   const monthlyNetIncome = totalAnnualNet / 12;
   const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
-  const mortgage = users.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
+  const mortgage = await getMortgageMonthly(db);
   // Use pace-based expenses for projections
   const monthlySurplus = monthlyNetIncome - monthlyExpenseAtPace;
 

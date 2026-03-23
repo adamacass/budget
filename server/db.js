@@ -335,6 +335,22 @@ async function initSchema() {
   // Deactivate old percentage levers (offset-centric model)
   await pool.query("UPDATE levers SET active = 0 WHERE name IN ('Offset Account %', 'Savings %', 'Investment %') AND active = 1");
 
+  // Centralised mortgage amount lever (single source of truth)
+  const mortgageLever = (await pool.query("SELECT id FROM levers WHERE name = 'Mortgage Monthly' AND active = 1")).rows[0];
+  if (!mortgageLever) {
+    const adminUser = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+    if (adminUser) {
+      // Sum existing per-user contributions as initial value
+      const totalMortgage = (await pool.query('SELECT SUM(mortgage_contribution) as total FROM users')).rows[0];
+      const mortgageAmt = parseFloat(totalMortgage?.total) || 4657;
+      await pool.query(
+        "INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ('Mortgage Monthly', 'Total monthly mortgage payment (auto-debited from offset on 23rd)', 'dollar', $1, $2)",
+        [mortgageAmt, adminUser.id]
+      );
+      console.log(`Mortgage Monthly lever seeded: $${mortgageAmt}`);
+    }
+  }
+
   // Ensure retention profiles exist for all users
   const allUsers = (await pool.query('SELECT id, username FROM users')).rows;
   for (const u of allUsers) {
