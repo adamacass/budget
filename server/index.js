@@ -984,9 +984,8 @@ app.get('/api/payday-events', authMiddleware, asyncHandler(async (req, res) => {
 // ===================== AUTO-MORTGAGE DEBIT =====================
 
 // Apply pending mortgage debits to offset balance (runs on dashboard load)
-// IMPORTANT: The stored offset balance ($58,236.51) ALREADY reflects all past mortgage debits.
-// This function only creates record markers for the chart — it NEVER deducts from balance
-// for historical months. Only future 23rds (after the feature was enabled) will deduct.
+// On each 23rd, deducts the mortgage amount from the offset balance and
+// proportionally reduces each savings goal bucket.
 async function applyPendingMortgageDebits(db) {
   const allUsers = (await db.query('SELECT mortgage_contribution FROM users')).rows;
   const mortgage = allUsers.reduce((sum, u) => sum + (u.mortgage_contribution || 0), 0);
@@ -995,16 +994,6 @@ async function applyPendingMortgageDebits(db) {
   const admin = (await db.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
   const userId = admin?.id || 1;
 
-  // Clean up any erroneous debits from the old buggy auto-debit that subtracted balance
-  const badDebits = (await db.query(
-    "SELECT id FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit'"
-  )).rows;
-  if (badDebits.length > 0) {
-    await db.query("DELETE FROM fund_allocations WHERE target_account = 'offset' AND notes = 'Mortgage auto-debit'");
-    // Restore offset balance
-    await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', 58236.51, $1)", [userId]);
-    console.log(`Cleaned up ${badDebits.length} erroneous mortgage debits, restored offset to $58,236.51`);
-  }
 
   // Ensure all past 23rds have a historical marker (for chart display only — no balance deduction)
   for (let y = 2026; y <= today.getFullYear(); y++) {
@@ -1021,9 +1010,17 @@ async function applyPendingMortgageDebits(db) {
 
       if (!existing) {
         await db.query(
-          "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit (historical)')",
+          "INSERT INTO fund_allocations (user_id, target_account, amount, allocated_date, notes) VALUES ($1, 'offset', $2, $3, 'Mortgage auto-debit')",
           [userId, -mortgage, dateStr]
         );
+
+        // Deduct the mortgage payment from the offset balance
+        const curBal = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+        if (curBal) {
+          const newBal = Math.round((curBal.balance - mortgage) * 100) / 100;
+          await db.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [newBal, userId]);
+          console.log(`Mortgage auto-debit ${dateStr}: deducted $${mortgage} from offset, new balance $${newBal}`);
+        }
 
         // Also record proportional mortgage deductions against goal buckets
         const goals = (await db.query('SELECT id, current_amount FROM savings_goals WHERE active = 1')).rows;
@@ -1042,6 +1039,11 @@ async function applyPendingMortgageDebits(db) {
                 await db.query(
                   "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
                   [goal.id, userId, -deduction, 'Mortgage deduction', dateStr + 'T12:00:00Z']
+                );
+                // Also reduce the goal's current_amount
+                await db.query(
+                  "UPDATE savings_goals SET current_amount = GREATEST(0, current_amount - $1) WHERE id = $2",
+                  [deduction, goal.id]
                 );
               }
             }
