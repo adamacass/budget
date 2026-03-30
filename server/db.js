@@ -188,6 +188,7 @@ async function initSchema() {
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS retention_amount REAL');
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS offset_transfer REAL');
     await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS mortgage_contribution REAL');
+    await pool.query('ALTER TABLE income_entries ADD COLUMN IF NOT EXISTS is_surplus INTEGER NOT NULL DEFAULT 0');
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS mortgage_contribution REAL NOT NULL DEFAULT 0');
   } catch (e) { /* columns may already exist */ }
 

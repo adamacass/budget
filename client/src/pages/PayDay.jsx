@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions } from '../api';
-import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock, Users, Zap, Award } from 'lucide-react';
+import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions, getUsers } from '../api';
+import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock, Users, Zap, Award, DollarSign, UserCircle } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtK(n) { return n >= 1000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
@@ -55,6 +55,16 @@ export default function PayDay() {
   const [sweepAmount, setSweepAmount] = useState('');
   const [sweepAdvice, setSweepAdvice] = useState(null);
   const [sweepLoading, setSweepLoading] = useState(false);
+  // Household users & person selector
+  const [householdUsers, setHouseholdUsers] = useState([]);
+  const [selectedUserId, setSelectedUserId] = useState(null);
+  // Ad-hoc income mode
+  const [adhocAmount, setAdhocAmount] = useState('');
+  const [adhocDate, setAdhocDate] = useState(new Date().toISOString().split('T')[0]);
+  const [adhocNotes, setAdhocNotes] = useState('');
+  const [adhocIsSurplus, setAdhocIsSurplus] = useState(true);
+  const [adhocGoalAllocations, setAdhocGoalAllocations] = useState({});
+  const [adhocSaved, setAdhocSaved] = useState(false);
 
   useEffect(() => {
     getBalances().then(setBalances).catch(console.error);
@@ -62,6 +72,10 @@ export default function PayDay() {
     getGoals().then(setGoals).catch(console.error);
     getIncome().then(setHistory).catch(console.error);
     getOffsetContributions().then(setContributions).catch(console.error);
+    getUsers().then(users => {
+      setHouseholdUsers(users);
+      if (user) setSelectedUserId(user.id);
+    }).catch(console.error);
   }, []);
 
   // Estimate net pay from gross
@@ -132,7 +146,8 @@ export default function PayDay() {
         retention_amount: effectiveRetention,
         mortgage_contribution: mortgagePerPeriod,
         offset_amount: totalToOffset,
-        goal_allocations: goalAllocs
+        goal_allocations: goalAllocs,
+        for_user_id: selectedUserId
       });
       setSaved(true);
       getBalances().then(setBalances);
@@ -185,16 +200,55 @@ export default function PayDay() {
     } catch (err) { alert(err.message); }
   }
 
+  // Ad-hoc income computations
+  const adhocAmountNum = parseFloat(adhocAmount) || 0;
+  const adhocTotalGoalAlloc = Object.values(adhocGoalAllocations).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  const adhocNewOffsetBalance = (balances.offset || 0) + adhocAmountNum;
+
+  async function handleAdhocComplete() {
+    try {
+      const goalAllocs = Object.entries(adhocGoalAllocations)
+        .filter(([_, amt]) => parseFloat(amt) > 0)
+        .map(([goalId, amt]) => ({ goal_id: parseInt(goalId), amount: parseFloat(amt) }));
+
+      await completePayDay({
+        net_amount: adhocAmountNum,
+        gross_amount: adhocAmountNum,
+        pay_date: adhocDate,
+        pay_type: 'other',
+        notes: adhocNotes || 'Ad-hoc income',
+        retention_amount: 0,
+        mortgage_contribution: adhocIsSurplus ? 0 : undefined,
+        offset_amount: adhocAmountNum,
+        goal_allocations: goalAllocs,
+        for_user_id: selectedUserId,
+        is_surplus: adhocIsSurplus
+      });
+      setAdhocSaved(true);
+      getBalances().then(setBalances);
+      getGoals().then(setGoals);
+      getOffsetContributions().then(setContributions);
+    } catch (err) { alert(err.message); }
+  }
+
   function handleModeSwitch(newMode) {
     setMode(newMode);
     setStep(1);
     setSweepAdvice(null);
     setSaved(false);
+    setAdhocSaved(false);
     setRetention(null);
+    setAdhocAmount('');
+    setAdhocNotes('');
+    setAdhocIsSurplus(true);
+    setAdhocGoalAllocations({});
+    if (user) setSelectedUserId(user.id);
   }
 
   const stepLabels = mode === 'payday'
     ? ['Record Pay', 'Retention & Surplus', 'Confirm & Allocate']
+    : mode === 'adhoc'
+    ? ['Enter Details', 'Allocate & Confirm']
     : ['Enter Balance', 'Get Advice', 'Confirm Sweep'];
 
   // Contribution breakdown helpers
@@ -203,17 +257,23 @@ export default function PayDay() {
   return (
     <div>
       <div className="page-header">
-        <h2>{mode === 'payday' ? 'Pay Day' : 'Offset Top-Up'}</h2>
+        <h2>{mode === 'payday' ? 'Pay Day' : mode === 'adhoc' ? 'Add Income' : 'Offset Top-Up'}</h2>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-          {mode === 'payday' ? 'Record pay, retain what you need, send the rest to offset' : 'Sweep excess cash from transaction account to offset'}
+          {mode === 'payday' ? 'Record pay, retain what you need, send the rest to offset'
+            : mode === 'adhoc' ? 'Add ad-hoc income to offset and allocate to savings buckets'
+            : 'Sweep excess cash from transaction account to offset'}
         </p>
       </div>
 
       {/* Mode toggle */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }} role="tablist" aria-label="Pay day mode">
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', flexWrap: 'wrap' }} role="tablist" aria-label="Pay day mode">
         <button className={`btn ${mode === 'payday' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => handleModeSwitch('payday')}
           role="tab" aria-selected={mode === 'payday'} aria-controls="payday-panel">
           <Wallet size={16} /> I Got Paid
+        </button>
+        <button className={`btn ${mode === 'adhoc' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => handleModeSwitch('adhoc')}
+          role="tab" aria-selected={mode === 'adhoc'} aria-controls="adhoc-panel">
+          <DollarSign size={16} /> Add Income
         </button>
         <button className={`btn ${mode === 'sweep' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => handleModeSwitch('sweep')}
           role="tab" aria-selected={mode === 'sweep'} aria-controls="sweep-panel">
@@ -223,7 +283,7 @@ export default function PayDay() {
 
       {/* Step indicator */}
       <nav className="payday-steps" aria-label="Pay day progress">
-        {[1, 2, 3].map(s => (
+        {(mode === 'adhoc' ? [1, 2] : [1, 2, 3]).map(s => (
           <div key={s} className={`payday-step ${step >= s ? 'active' : ''} ${step === s ? 'current' : ''}`}
             aria-current={step === s ? 'step' : undefined}>
             <div className="payday-step-circle" aria-hidden="true">
@@ -274,6 +334,25 @@ export default function PayDay() {
               </select>
             </div>
           </div>
+          {/* Person selector */}
+          {householdUsers.length > 1 && (
+            <div className="form-group">
+              <label htmlFor="pay-person" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <UserCircle size={14} /> Recording for
+              </label>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                {householdUsers.map(u => (
+                  <button key={u.id} type="button"
+                    className={`btn btn-sm ${selectedUserId === u.id ? 'btn-primary' : 'btn-ghost'}`}
+                    onClick={() => setSelectedUserId(u.id)}
+                    style={{ flex: 1 }}>
+                    {u.display_name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="form-group">
             <label htmlFor="pay-notes">Notes (optional)</label>
             <input id="pay-notes" className="form-input" value={notes} onChange={e => setNotes(e.target.value)} placeholder="e.g. Includes 5 hrs overtime" />
@@ -703,6 +782,208 @@ export default function PayDay() {
                   <CheckCircle size={16} /> Send {fmtMoney(totalToOffset)} to Offset
                 </button>
                 <button className="btn btn-ghost" onClick={() => setStep(2)}>Back</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ==================== AD-HOC INCOME MODE ==================== */}
+
+      {mode === 'adhoc' && step === 1 && (
+        <div className="card" role="form" aria-label="Add ad-hoc income">
+          <div className="card-title"><DollarSign size={18} /> Add Income to Offset</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Add extra income (tax return, side hustle, gift, etc.) directly to the offset account.
+          </p>
+
+          {/* Person selector */}
+          {householdUsers.length > 1 && (
+            <div className="form-group">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <UserCircle size={14} /> Who is this income for?
+              </label>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                {householdUsers.map(u => (
+                  <button key={u.id} type="button"
+                    className={`btn btn-sm ${selectedUserId === u.id ? 'btn-primary' : 'btn-ghost'}`}
+                    onClick={() => setSelectedUserId(u.id)}
+                    style={{ flex: 1 }}>
+                    {u.display_name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="adhoc-amount">Amount ($)</label>
+              <input id="adhoc-amount" className="form-input" type="number" step="0.01" value={adhocAmount}
+                onChange={e => setAdhocAmount(e.target.value)} placeholder="Amount to add"
+                style={{ fontSize: '1.1rem', fontWeight: 600 }} autoFocus />
+            </div>
+            <div className="form-group">
+              <label htmlFor="adhoc-date">Date</label>
+              <input id="adhoc-date" className="form-input" type="date" value={adhocDate}
+                onChange={e => setAdhocDate(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="adhoc-notes">Description</label>
+            <input id="adhoc-notes" className="form-input" value={adhocNotes}
+              onChange={e => setAdhocNotes(e.target.value)} placeholder="e.g. Tax return, freelance payment, birthday gift" />
+          </div>
+
+          {/* Surplus toggle */}
+          <div className="form-group" style={{ marginTop: '0.5rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '0.75rem', background: adhocIsSurplus ? 'rgba(0,184,148,0.1)' : 'rgba(255,234,167,0.15)', borderRadius: 8, border: `1px solid ${adhocIsSurplus ? 'rgba(0,184,148,0.3)' : 'rgba(255,234,167,0.3)'}` }}>
+              <input type="checkbox" checked={adhocIsSurplus} onChange={e => setAdhocIsSurplus(e.target.checked)}
+                style={{ width: 18, height: 18, accentColor: 'var(--green)' }} />
+              <div>
+                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>True surplus (not for mortgage)</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {adhocIsSurplus
+                    ? 'This money is fully available for savings goals — it won\'t be counted toward mortgage reserves.'
+                    : 'This money will be treated as general offset income, with a portion reserved for mortgage.'}
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <button className="btn btn-primary" onClick={() => setStep(2)} disabled={!adhocAmount || parseFloat(adhocAmount) <= 0}
+            style={{ marginTop: '1rem' }}>
+            Continue to Allocate
+          </button>
+        </div>
+      )}
+
+      {mode === 'adhoc' && step === 2 && (
+        <div>
+          {/* Transfer summary */}
+          <div className="card offset-hero-card">
+            <div className="card-title"><TrendingUp size={18} /> Transfer Summary</div>
+            <div className="retention-breakdown" style={{ marginBottom: '1rem' }} role="table" aria-label="Ad-hoc income breakdown">
+              <div className="retention-row" role="row">
+                <span role="cell">Income amount</span>
+                <span role="cell">{fmtMoney(adhocAmountNum)}</span>
+              </div>
+              <div className="retention-row" role="row">
+                <span role="cell">For</span>
+                <span role="cell" style={{ fontWeight: 600 }}>{householdUsers.find(u => u.id === selectedUserId)?.display_name || user?.display_name}</span>
+              </div>
+              {adhocIsSurplus && (
+                <div className="retention-row" role="row" style={{ color: 'var(--green)' }}>
+                  <span role="cell">Type</span>
+                  <span role="cell" style={{ fontWeight: 600 }}>True surplus (not for mortgage)</span>
+                </div>
+              )}
+              <div className="retention-row total" role="row" style={{ color: 'var(--green)' }}>
+                <span role="cell">Total to offset account</span>
+                <span role="cell">{fmtMoney(adhocAmountNum)}</span>
+              </div>
+            </div>
+
+            {adhocNotes && (
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.75rem', fontStyle: 'italic' }}>
+                {adhocNotes}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+              <div className="stat-card" style={{ flex: 1, minWidth: 140 }}>
+                <div className="stat-label">Offset Before</div>
+                <div className="stat-value">{fmtK(balances.offset || 0)}</div>
+              </div>
+              <div className="stat-card" style={{ flex: 1, minWidth: 140, borderColor: 'var(--green)' }}>
+                <div className="stat-label">Offset After</div>
+                <div className="stat-value positive">{fmtK(adhocNewOffsetBalance)}</div>
+              </div>
+              <div className="stat-card" style={{ flex: 1, minWidth: 140 }}>
+                <div className="stat-label">Interest Saved</div>
+                <div className="stat-value positive">~{fmtMoney(adhocNewOffsetBalance * RATE / 12)}/mo</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Goal allocations */}
+          {goals.length > 0 && adhocAmountNum > 0 && (
+            <div className="card" style={{ marginTop: '1rem' }}>
+              <div className="card-title"><Target size={18} /> Allocate to Savings Buckets</div>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                Earmark portions of this {fmtMoney(adhocAmountNum)} for your goals. These are virtual buckets within offset — money stays earning interest.
+              </p>
+
+              {goals.map(g => {
+                const pct = g.target_amount > 0 ? (g.current_amount / g.target_amount * 100) : 0;
+                return (
+                  <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.75rem' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{g.name}</div>
+                      <div className="progress-bar" style={{ height: 6, marginTop: 4 }}>
+                        <div className="progress-fill" style={{ width: `${Math.min(pct, 100)}%` }} />
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                        {fmtMoney(g.current_amount)} / {fmtMoney(g.target_amount)} ({pct.toFixed(0)}%)
+                      </div>
+                    </div>
+                    <input className="form-input" type="number" step="0.01" style={{ width: 120 }}
+                      value={adhocGoalAllocations[g.id] || ''}
+                      onChange={e => setAdhocGoalAllocations(prev => ({ ...prev, [g.id]: e.target.value }))}
+                      placeholder="$0.00" aria-label={`Allocate to ${g.name}`} />
+                  </div>
+                );
+              })}
+
+              {adhocTotalGoalAlloc > 0 && (
+                <div role="status" style={{ fontSize: '0.85rem', color: adhocTotalGoalAlloc > adhocAmountNum ? 'var(--red)' : 'var(--text-muted)', marginTop: '0.5rem' }}>
+                  Earmarking {fmtMoney(adhocTotalGoalAlloc)} of {fmtMoney(adhocAmountNum)} for goals.
+                  {adhocTotalGoalAlloc > adhocAmountNum && ' Warning: exceeds income amount!'}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="btn-group" style={{ marginTop: '1rem' }}>
+            {adhocSaved ? (
+              <div className="payday-success-card card-animate" role="alert">
+                <div className="corgi-celebration">
+                  <svg viewBox="0 0 64 64" width="56" height="56" className="corgi-svg corgi-bounce">
+                    <ellipse cx="32" cy="42" rx="18" ry="10" fill="#f0c36d" />
+                    <ellipse cx="48" cy="42" rx="6" ry="8" fill="#e8b85a" />
+                    <path d="M52 36 Q58 28 56 22" stroke="#d4a030" strokeWidth="3" fill="none" strokeLinecap="round" className="corgi-tail-wag" />
+                    <rect x="20" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+                    <rect x="28" y="48" width="4" height="10" rx="2" fill="#f0c36d" />
+                    <rect x="38" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+                    <rect x="44" y="48" width="4" height="10" rx="2" fill="#e8b85a" />
+                    <circle cx="16" cy="32" r="12" fill="#f0c36d" />
+                    <ellipse cx="8" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(-15 8 22)" />
+                    <ellipse cx="24" cy="22" rx="5" ry="8" fill="#d4a030" transform="rotate(15 24 22)" />
+                    <ellipse cx="16" cy="36" rx="6" ry="5" fill="#fff5e0" />
+                    <circle cx="12" cy="30" r="2.5" fill="#2d3436" /><circle cx="20" cy="30" r="2.5" fill="#2d3436" />
+                    <circle cx="12.8" cy="29.2" r="0.8" fill="white" /><circle cx="20.8" cy="29.2" r="0.8" fill="white" />
+                    <ellipse cx="16" cy="35" rx="2" ry="1.5" fill="#2d3436" />
+                    <path d="M13 37 Q16 40 19 37" stroke="#2d3436" strokeWidth="1" fill="none" strokeLinecap="round" />
+                    <ellipse cx="16" cy="40" rx="2" ry="2.5" fill="#ff7675" />
+                  </svg>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--green)' }}>
+                      <CheckCircle size={18} style={{ verticalAlign: 'text-bottom' }} /> Income added!
+                    </div>
+                    <div style={{ fontSize: '0.9rem', marginTop: 4 }}>
+                      {fmtMoney(adhocAmountNum)} added to offset for {householdUsers.find(u => u.id === selectedUserId)?.display_name || user?.display_name}
+                      {adhocIsSurplus && ' (true surplus)'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <button className="btn btn-success" onClick={handleAdhocComplete} disabled={adhocAmountNum <= 0}>
+                  <CheckCircle size={16} /> Add {fmtMoney(adhocAmountNum)} to Offset
+                </button>
+                <button className="btn btn-ghost" onClick={() => setStep(1)}>Back</button>
               </>
             )}
           </div>

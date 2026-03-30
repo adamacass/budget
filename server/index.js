@@ -118,6 +118,14 @@ app.put('/api/auth/password', authMiddleware, asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated' });
 }));
 
+// ===================== USERS LIST =====================
+
+app.get('/api/users', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { rows } = await db.query('SELECT id, username, display_name, role, pay_cycle, mortgage_contribution FROM users ORDER BY id');
+  res.json(rows);
+}));
+
 // ===================== EXPENSE ROUTES =====================
 
 app.get('/api/expenses', authMiddleware, asyncHandler(async (req, res) => {
@@ -695,17 +703,20 @@ app.put('/api/retention/:userId', authMiddleware, asyncHandler(async (req, res) 
 // ===================== PAYDAY COMPLETE (offset-centric) =====================
 
 app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) => {
-  const { net_amount, gross_amount, pay_date, pay_type, notes, retention_amount, offset_amount, mortgage_contribution, goal_allocations } = req.body;
+  const { net_amount, gross_amount, pay_date, pay_type, notes, retention_amount, offset_amount, mortgage_contribution, goal_allocations, for_user_id, is_surplus } = req.body;
   const db = await getDb();
   const client = await db.connect();
+
+  // Allow recording income on behalf of another household member
+  const effectiveUserId = for_user_id || req.user.id;
 
   try {
     await client.query('BEGIN');
 
     // 1. Record income entry
     const incomeResult = await client.query(
-      'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes, retention_amount, offset_transfer, mortgage_contribution) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-      [req.user.id, gross_amount || net_amount, net_amount, pay_date, pay_type || 'regular', notes || null, retention_amount, offset_amount, mortgage_contribution || 0]
+      'INSERT INTO income_entries (user_id, amount, net_amount, pay_date, pay_type, notes, retention_amount, offset_transfer, mortgage_contribution, is_surplus) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [effectiveUserId, gross_amount || net_amount, net_amount, pay_date, pay_type || 'regular', notes || null, retention_amount, offset_amount, mortgage_contribution || 0, is_surplus ? 1 : 0]
     );
     const incomeEntry = incomeResult.rows[0];
 
@@ -713,13 +724,13 @@ app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) =
     if (offset_amount > 0) {
       await client.query(
         'INSERT INTO fund_allocations (user_id, income_entry_id, target_account, amount, allocated_date, notes) VALUES ($1, $2, $3, $4, $5, $6)',
-        [req.user.id, incomeEntry.id, 'offset', offset_amount, pay_date, 'Offset transfer (surplus after retention)']
+        [effectiveUserId, incomeEntry.id, 'offset', offset_amount, pay_date, 'Offset transfer (surplus after retention)']
       );
 
       // Update offset balance
       const existing = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
       const newBalance = (existing ? existing.balance : 0) + offset_amount;
-      await client.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [newBalance, req.user.id]);
+      await client.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [newBalance, effectiveUserId]);
     }
 
     // 3. Process goal allocations (virtual buckets within offset)
@@ -728,7 +739,7 @@ app.post('/api/payday/complete', authMiddleware, asyncHandler(async (req, res) =
         if (ga.amount > 0) {
           await client.query(
             'INSERT INTO goal_contributions (goal_id, user_id, amount, income_entry_id, notes, contributed_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()))',
-            [ga.goal_id, req.user.id, ga.amount, incomeEntry.id, ga.notes || 'PayDay contribution', pay_date ? pay_date + 'T12:00:00Z' : null]
+            [ga.goal_id, effectiveUserId, ga.amount, incomeEntry.id, ga.notes || 'PayDay contribution', pay_date ? pay_date + 'T12:00:00Z' : null]
           );
           await client.query(
             'UPDATE savings_goals SET current_amount = current_amount + $1 WHERE id = $2',

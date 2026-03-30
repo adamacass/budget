@@ -90,6 +90,9 @@ export const resolveUpcomingExpense = (id) => apiFetch(`/api/upcoming-expenses/$
 export const getRetention = (userId) => apiFetch(`/api/retention/${userId}`);
 export const updateRetention = (userId, data) => apiFetch(`/api/retention/${userId}`, { method: 'PUT', body: JSON.stringify(data) });
 
+// Users (household members)
+export const getUsers = () => apiFetch('/api/users');
+
 // PayDay Complete (offset-centric)
 export const completePayDay = (data) => apiFetch('/api/payday/complete', { method: 'POST', body: JSON.stringify(data) });
 
