@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 4000;
 const DATA_START_DATE = '2026-01-01';
 function clampDate(date) { return date < DATA_START_DATE ? DATA_START_DATE : date; }
 
+// Categories excluded from "core" spending view (large lumpy or non-discretionary items)
+const OUTLIER_CATEGORIES = ['Insurance', 'Mortgage', 'Home'];
+
 // Wrap async route handlers so unhandled rejections return 500 instead of crashing
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -1484,6 +1487,12 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const fourteenAgo = clampDate(new Date(Date.now() - 13 * 86400000).toISOString().split('T')[0]);
   const dailySpending = [];
 
+  // Core daily spending (excluding outlier categories) — batch query for the range
+  const coreDailyInsights = (await db.query(
+    `SELECT expense_date::text, SUM(amount) as core_total FROM expenses WHERE expense_date >= $1 AND expense_date <= $2 AND NOT (category = ANY($3)) GROUP BY expense_date`,
+    [fourteenAgo, today, OUTLIER_CATEGORIES]
+  )).rows;
+
   // Fetch payday events for this range
   const payEventsRaw = (await db.query(
     `SELECT ie.pay_date, ie.offset_transfer, ie.retention_amount, ie.net_amount, ie.amount, u.display_name as user_name
@@ -1518,7 +1527,8 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
     if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
-    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) };
+    const coreEntry = coreDailyInsights.find(r => r.expense_date === date);
+    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, core_total: parseFloat(coreEntry?.core_total) || 0, count: parseInt(row.cnt) };
 
     // Attach payday events
     const dayPayEvents = payEventsRaw.filter(pe => pe.pay_date === date);
@@ -1552,6 +1562,48 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
     'SELECT e.id, e.category, e.description, e.amount, e.expense_date, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id ORDER BY e.created_at DESC, e.id DESC LIMIT 5'
   )).rows;
 
+  // Month-over-month comparison analytics
+  const sixtyDaysAgo = clampDate(new Date(Date.now() - 60 * 86400000).toISOString().split('T')[0]);
+  const prevMonthTotalRow = (await db.query(
+    'SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND expense_date < $2',
+    [sixtyDaysAgo, thirtyDaysAgo]
+  )).rows[0];
+  const coreMonthTotalRow = (await db.query(
+    'SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))',
+    [thirtyDaysAgo, OUTLIER_CATEGORIES]
+  )).rows[0];
+  const prevCoreMonthRow = (await db.query(
+    'SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND expense_date < $2 AND NOT (category = ANY($3))',
+    [sixtyDaysAgo, thirtyDaysAgo, OUTLIER_CATEGORIES]
+  )).rows[0];
+
+  // Core spending pace
+  const coreDailyAvg = (parseFloat(coreMonthTotalRow.total) || 0) / daysElapsed;
+
+  // Category trends: current 30d vs previous 30d
+  const currentCatRows = (await db.query(
+    'SELECT category, SUM(amount) as total FROM expenses WHERE expense_date >= $1 GROUP BY category',
+    [thirtyDaysAgo]
+  )).rows;
+  const previousCatRows = (await db.query(
+    'SELECT category, SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND expense_date < $2 GROUP BY category',
+    [sixtyDaysAgo, thirtyDaysAgo]
+  )).rows;
+  const categoryTrends = currentCatRows
+    .map(curr => {
+      const prev = previousCatRows.find(p => p.category === curr.category);
+      const prevTotal = parseFloat(prev?.total) || 0;
+      const currTotal = parseFloat(curr.total);
+      return {
+        category: curr.category,
+        current: Math.round(currTotal),
+        previous: Math.round(prevTotal),
+        change: Math.round(currTotal - prevTotal),
+        change_pct: prevTotal > 0 ? Math.round(((currTotal - prevTotal) / prevTotal) * 100) : null,
+      };
+    })
+    .sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+
   // Offset interest insight
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1", ['offset'])).rows[0];
   const offsetBal = offsetRow ? offsetRow.balance : 0;
@@ -1565,6 +1617,11 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const monthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
 
+  // Core budget (total budget minus outlier categories)
+  const coreBudget = budgets
+    .filter(b => !OUTLIER_CATEGORIES.includes(b.category))
+    .reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
+
   res.json({
     user_activity: userActivity,
     spending_pace: {
@@ -1573,6 +1630,10 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
       monthly_budget: Math.round(monthlyBudget),
       days_elapsed: daysElapsed,
       total_spent: Math.round(parseFloat(totalMonth.total) || 0),
+      core_total_spent: Math.round(parseFloat(coreMonthTotalRow.total) || 0),
+      core_daily_average: Math.round(coreDailyAvg),
+      core_projected_monthly: Math.round(coreDailyAvg * 30),
+      core_monthly_budget: Math.round(coreBudget),
     },
     daily_spending: dailySpending,
     biggest_expenses: biggestExpenses,
@@ -1583,6 +1644,10 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
       annual_interest_saved: Math.round(annualInterestSaved),
       mortgage_rate: mortgageRate,
     },
+    core_monthly_spent: Math.round(parseFloat(coreMonthTotalRow.total) || 0),
+    prev_month_total: Math.round(parseFloat(prevMonthTotalRow.total) || 0),
+    prev_core_total: Math.round(parseFloat(prevCoreMonthRow.total) || 0),
+    category_trends: categoryTrends,
   });
 }));
 
@@ -1625,12 +1690,19 @@ app.get('/api/daily-spending', authMiddleware, asyncHandler(async (req, res) => 
     }
   }
 
+  // Core daily spending (batch query)
+  const coreDailyRange = (await db.query(
+    `SELECT expense_date::text, SUM(amount) as core_total FROM expenses WHERE expense_date >= $1 AND expense_date <= $2 AND NOT (category = ANY($3)) GROUP BY expense_date`,
+    [startDate, today, OUTLIER_CATEGORIES]
+  )).rows;
+
   const dailySpending = [];
   for (let d = numDays - 1; d >= 0; d--) {
     const date = new Date(Date.now() - d * 86400000).toISOString().split('T')[0];
     if (date < DATA_START_DATE) continue;
     const row = (await db.query('SELECT SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE expense_date = $1', [date])).rows[0];
-    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, count: parseInt(row.cnt) };
+    const coreEntry = coreDailyRange.find(r => r.expense_date === date);
+    const dayData = { date: date.substring(5), full_date: date, total: parseFloat(row.total) || 0, core_total: parseFloat(coreEntry?.core_total) || 0, count: parseInt(row.cnt) };
 
     const dayPayEvents = payEventsRaw.filter(pe => pe.pay_date === date);
     if (dayPayEvents.length > 0) {
@@ -1671,6 +1743,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const sevenDaysAgo = clampDate(new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]);
 
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+  const coreMonthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [thirtyDaysAgo, OUTLIER_CATEGORIES])).rows[0];
   const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
   const monthlyIncome = (await db.query('SELECT SUM(COALESCE(net_amount, amount)) as total FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows[0];
 
@@ -1763,6 +1836,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
 
   res.json({
     monthly_expenses: parseFloat(monthlyExpenses.total) || 0,
+    core_monthly_expenses: parseFloat(coreMonthlyExpenses.total) || 0,
     weekly_expenses: parseFloat(weeklyExpenses.total) || 0,
     monthly_income: parseFloat(monthlyIncome.total) || 0,
     net_monthly: (parseFloat(monthlyIncome.total) || 0) - (parseFloat(monthlyExpenses.total) || 0),
@@ -1775,6 +1849,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     estimated_monthly_income: Math.round(estimatedMonthlyIncome),
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
+    core_budgeted_expenses: Math.round(budgets.filter(b => !OUTLIER_CATEGORIES.includes(b.category)).reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0)),
     weekly_budget: Math.round(weeklyBudget),
     budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) })),
     offset_history: offsetHistory
