@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getBalances, updateBalance, exportToExcel, downloadBackup, restoreBackup, getCategoryRules, deleteCategoryRule } from '../api';
+import { getBalances, updateBalance, exportToExcel, exportForAI, downloadBackup, restoreBackup, getCategoryRules, deleteCategoryRule } from '../api';
 import { Save, Download, Key, User, DollarSign, Database, Upload, Smartphone, Tag, Trash2, Copy } from 'lucide-react';
 import { CATEGORIES, getCategoryColor } from '../categoryColors';
 
@@ -251,26 +251,73 @@ export default function Settings() {
       )}
 
       {tab === 'export' && (
-        <div className="card">
-          <div className="card-title">Export to Excel</div>
-          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-            Download all expenses, income, goals, and balances as an Excel spreadsheet.
-          </p>
-          <div className="form-row">
-            <div className="form-group">
-              <label>From</label>
-              <input className="form-input" type="date" value={exportRange.start}
-                onChange={e => setExportRange({ ...exportRange, start: e.target.value })} />
+        <div>
+          {/* AI Analysis Export */}
+          <div className="card" style={{ marginBottom: '1rem', border: '1px solid var(--accent)', borderRadius: 12 }}>
+            <div className="card-title" style={{ color: 'var(--accent)' }}>
+              <Download size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+              AI Analysis Export (JSON)
             </div>
-            <div className="form-group">
-              <label>To</label>
-              <input className="form-input" type="date" value={exportRange.end}
-                onChange={e => setExportRange({ ...exportRange, end: e.target.value })} />
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: 1.6 }}>
+              Downloads a comprehensive JSON file you can upload directly to Claude, ChatGPT, or any AI assistant for deep financial analysis.
+              Includes everything: income with offset/retention breakdown, goal contribution history, monthly summaries, household profiles, and pre-computed metrics.
+            </p>
+            <div style={{ fontSize: '0.8rem', background: 'var(--bg)', borderRadius: 8, padding: '0.6rem 0.75rem', marginBottom: '0.75rem' }}>
+              <strong>Includes:</strong>
+              <ul style={{ margin: '0.25rem 0 0 0', paddingLeft: '1.2rem', color: 'var(--text-muted)', lineHeight: 1.8 }}>
+                <li>All expenses with core/outlier flag</li>
+                <li>Every pay event — net pay, offset transfer, retention kept, goal allocations</li>
+                <li>Savings goal progress + full contribution history</li>
+                <li>Offset balance history over time</li>
+                <li>Monthly summaries (total, core, by category, income vs spending)</li>
+                <li>Household profiles — income, tax, HECS, mortgage contribution</li>
+                <li>Category budgets and configuration levers</li>
+                <li>Upcoming planned expenses</li>
+                <li>Pre-computed key metrics + suggested analysis questions</li>
+              </ul>
             </div>
+            <div className="form-row" style={{ marginBottom: '0.75rem' }}>
+              <div className="form-group">
+                <label>From (leave blank for all data)</label>
+                <input className="form-input" type="date" value={exportRange.start}
+                  onChange={e => setExportRange({ ...exportRange, start: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label>To</label>
+                <input className="form-input" type="date" value={exportRange.end}
+                  onChange={e => setExportRange({ ...exportRange, end: e.target.value })} />
+              </div>
+            </div>
+            <button className="btn btn-primary" onClick={async () => {
+              try { await exportForAI(exportRange); }
+              catch (err) { alert('Export failed: ' + err.message); }
+            }}>
+              <Download size={14} /> Download AI Analysis JSON
+            </button>
           </div>
-          <button className="btn btn-primary" onClick={() => exportToExcel(exportRange)}>
-            <Download size={14} /> Download Excel
-          </button>
+
+          {/* Excel Export */}
+          <div className="card">
+            <div className="card-title">Export to Excel</div>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+              Download expenses, income, goals, and balances as an Excel spreadsheet.
+            </p>
+            <div className="form-row">
+              <div className="form-group">
+                <label>From</label>
+                <input className="form-input" type="date" value={exportRange.start}
+                  onChange={e => setExportRange({ ...exportRange, start: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label>To</label>
+                <input className="form-input" type="date" value={exportRange.end}
+                  onChange={e => setExportRange({ ...exportRange, end: e.target.value })} />
+              </div>
+            </div>
+            <button className="btn btn-primary" onClick={() => exportToExcel(exportRange)}>
+              <Download size={14} /> Download Excel
+            </button>
+          </div>
         </div>
       )}
 

@@ -1954,6 +1954,267 @@ app.get('/api/export', authMiddleware, asyncHandler(async (req, res) => {
   res.send(buffer);
 }));
 
+// ===================== AI ANALYSIS EXPORT =====================
+
+app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { start, end } = req.query;
+  const s = start || DATA_START_DATE;
+  const e = end || new Date().toISOString().split('T')[0];
+
+  // ── Household / config ──────────────────────────────────────────
+  const users = (await db.query('SELECT display_name, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution FROM users ORDER BY id')).rows;
+  const levers = (await db.query('SELECT name, description, value FROM levers WHERE active = 1')).rows;
+  const mortgageMonthly = await getMortgageMonthly(db);
+  const budgetScaleLever = levers.find(l => l.name.includes('Budget Scale'));
+  const budgetScale = (budgetScaleLever?.value || 100) / 100;
+
+  const memberProfiles = users.map(u => {
+    const grossExSuper = u.gross_income / (1 + u.super_rate);
+    let tax = 0;
+    if (grossExSuper > 190000) tax = 51667 + (grossExSuper - 190000) * 0.45;
+    else if (grossExSuper > 135000) tax = 29467 + (grossExSuper - 135000) * 0.37;
+    else if (grossExSuper > 45000) tax = 5092 + (grossExSuper - 45000) * 0.325;
+    else if (grossExSuper > 18200) tax = (grossExSuper - 18200) * 0.19;
+    const annualNet = grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
+    return {
+      name: u.display_name,
+      gross_income_incl_super: u.gross_income,
+      estimated_annual_net: Math.round(annualNet),
+      estimated_monthly_net: Math.round(annualNet / 12),
+      pay_cycle: u.pay_cycle,
+      super_rate_pct: Math.round(u.super_rate * 1000) / 10,
+      hecs_repayment_rate_pct: Math.round(u.hecs_repayment_rate * 1000) / 10,
+      mortgage_contribution_monthly: u.mortgage_contribution,
+    };
+  });
+
+  // ── Account balances ────────────────────────────────────────────
+  const acctTypes = ['offset', 'savings', 'credit_card', 'investment'];
+  const currentBalances = {};
+  for (const acct of acctTypes) {
+    const row = (await db.query('SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1', [acct])).rows[0];
+    currentBalances[acct] = row ? parseFloat(row.balance) : 0;
+  }
+  const offsetHistory = (await db.query(
+    `SELECT DISTINCT ON (updated_at::date) updated_at::date::text as date, balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at::date, updated_at DESC`
+  )).rows.map(r => ({ date: r.date, balance: parseFloat(r.balance) }));
+
+  // ── Category budgets ────────────────────────────────────────────
+  const budgetRows = (await db.query('SELECT category, monthly_amount FROM category_budgets ORDER BY category')).rows;
+  const categoryBudgets = budgetRows.map(b => ({
+    category: b.category,
+    monthly_budget: Math.round(b.monthly_amount * budgetScale),
+    is_core: !OUTLIER_CATEGORIES.includes(b.category),
+  }));
+
+  // ── Savings goals with contribution history ─────────────────────
+  const goalRows = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const goalContribRows = (await db.query(
+    `SELECT gc.goal_id, gc.amount, gc.notes, ie.pay_date, u.display_name as person
+     FROM goal_contributions gc
+     JOIN savings_goals sg ON gc.goal_id = sg.id
+     LEFT JOIN income_entries ie ON gc.income_entry_id = ie.id
+     LEFT JOIN users u ON gc.user_id = u.id
+     WHERE ie.pay_date >= $1 OR gc.income_entry_id IS NULL
+     ORDER BY COALESCE(ie.pay_date, gc.contributed_at::date::text) ASC`,
+    [s]
+  )).rows;
+
+  const savingsGoals = goalRows.map(g => ({
+    name: g.name,
+    target: g.target_amount,
+    current: g.current_amount,
+    progress_pct: g.target_amount > 0 ? Math.round((g.current_amount / g.target_amount) * 100) : null,
+    priority: g.priority,
+    target_date: g.target_date || null,
+    contributions: goalContribRows
+      .filter(c => c.goal_id === g.id)
+      .map(c => ({ date: c.pay_date || null, amount: parseFloat(c.amount), person: c.person, notes: c.notes })),
+  }));
+
+  // ── Income entries with goal allocations ────────────────────────
+  const incomeRows = (await db.query(
+    `SELECT ie.id, ie.pay_date, u.display_name as person, ie.pay_type, ie.amount, ie.net_amount,
+            ie.offset_transfer, ie.retention_amount, ie.mortgage_contribution, ie.is_surplus, ie.notes
+     FROM income_entries ie JOIN users u ON ie.user_id = u.id
+     WHERE ie.pay_date >= $1 AND ie.pay_date <= $2
+     ORDER BY ie.pay_date ASC`,
+    [s, e]
+  )).rows;
+
+  const goalContribByIncome = (await db.query(
+    `SELECT gc.income_entry_id, sg.name as goal_name, gc.amount
+     FROM goal_contributions gc JOIN savings_goals sg ON gc.goal_id = sg.id
+     WHERE gc.income_entry_id IS NOT NULL`
+  )).rows;
+
+  const incomeEntries = incomeRows.map(i => ({
+    date: i.pay_date,
+    person: i.person,
+    type: i.pay_type,
+    is_surplus_entry: !!i.is_surplus,
+    gross_amount: parseFloat(i.amount),
+    net_amount: parseFloat(i.net_amount || i.amount),
+    offset_transfer: parseFloat(i.offset_transfer || 0),
+    retention_kept: parseFloat(i.retention_amount || 0),
+    mortgage_contribution: parseFloat(i.mortgage_contribution || 0),
+    notes: i.notes || null,
+    goal_allocations: goalContribByIncome
+      .filter(g => g.income_entry_id === i.id)
+      .map(g => ({ goal: g.goal_name, amount: parseFloat(g.amount) })),
+  }));
+
+  // ── Expenses ────────────────────────────────────────────────────
+  const expenseRows = (await db.query(
+    `SELECT e.expense_date, u.display_name as person, e.category, e.subcategory,
+            e.description, e.amount, e.entry_type
+     FROM expenses e JOIN users u ON e.user_id = u.id
+     WHERE e.expense_date >= $1 AND e.expense_date <= $2
+     ORDER BY e.expense_date ASC`,
+    [s, e]
+  )).rows;
+
+  const expenses = expenseRows.map(r => ({
+    date: r.expense_date,
+    person: r.person,
+    category: r.category,
+    subcategory: r.subcategory || null,
+    description: r.description,
+    amount: parseFloat(r.amount),
+    is_core: !OUTLIER_CATEGORIES.includes(r.category),
+    type: r.entry_type,
+  }));
+
+  // ── Upcoming expenses ───────────────────────────────────────────
+  const upcomingRows = (await db.query(
+    `SELECT ue.description, ue.estimated_amount, ue.expected_date, ue.category, ue.notes, u.display_name as person
+     FROM upcoming_expenses ue JOIN users u ON ue.user_id = u.id
+     WHERE ue.resolved = 0 ORDER BY ue.expected_date ASC`
+  )).rows;
+  const upcomingExpenses = upcomingRows.map(r => ({
+    description: r.description,
+    estimated_amount: parseFloat(r.estimated_amount),
+    expected_date: r.expected_date,
+    category: r.category || null,
+    person: r.person,
+    notes: r.notes || null,
+  }));
+
+  // ── Monthly summaries ───────────────────────────────────────────
+  const monthlyCatRows = (await db.query(
+    `SELECT TO_CHAR(expense_date::date, 'YYYY-MM') as month, category, SUM(amount) as total
+     FROM expenses WHERE expense_date >= $1 AND expense_date <= $2
+     GROUP BY month, category ORDER BY month, total DESC`,
+    [s, e]
+  )).rows;
+
+  const monthlyIncomeRows = (await db.query(
+    `SELECT TO_CHAR(pay_date::date, 'YYYY-MM') as month,
+            SUM(net_amount) as total_net,
+            SUM(COALESCE(offset_transfer, 0)) as total_offset,
+            SUM(COALESCE(retention_amount, 0)) as total_retained
+     FROM income_entries WHERE pay_date >= $1 AND pay_date <= $2
+     GROUP BY month ORDER BY month`,
+    [s, e]
+  )).rows;
+
+  const allMonths = [...new Set([
+    ...monthlyCatRows.map(r => r.month),
+    ...monthlyIncomeRows.map(r => r.month),
+  ])].sort();
+
+  const monthlySummaries = allMonths.map(month => {
+    const catRows = monthlyCatRows.filter(r => r.month === month);
+    const byCategory = {};
+    let total = 0;
+    let core = 0;
+    for (const r of catRows) {
+      byCategory[r.category] = Math.round(parseFloat(r.total));
+      total += parseFloat(r.total);
+      if (!OUTLIER_CATEGORIES.includes(r.category)) core += parseFloat(r.total);
+    }
+    const incRow = monthlyIncomeRows.find(r => r.month === month);
+    return {
+      month,
+      total_spending: Math.round(total),
+      core_spending: Math.round(core),
+      outlier_spending: Math.round(total - core),
+      income_received: Math.round(parseFloat(incRow?.total_net || 0)),
+      offset_transfers: Math.round(parseFloat(incRow?.total_offset || 0)),
+      retention_kept: Math.round(parseFloat(incRow?.total_retained || 0)),
+      spending_by_category: byCategory,
+    };
+  });
+
+  // ── Key computed metrics ────────────────────────────────────────
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+  const totalSpent30d = (await db.query('SELECT SUM(amount) as t FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+  const coreSpent30d = (await db.query('SELECT SUM(amount) as t FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [thirtyDaysAgo, OUTLIER_CATEGORIES])).rows[0];
+  const offsetBal = currentBalances.offset || 0;
+  const annualInterestSaved = offsetBal * 0.062;
+  const totalMonthlyBudget = budgetRows.reduce((s, b) => s + b.monthly_amount * budgetScale, 0);
+  const coreMonthlyBudget = budgetRows.filter(b => !OUTLIER_CATEGORIES.includes(b.category)).reduce((s, b) => s + b.monthly_amount * budgetScale, 0);
+  const totalMonthlyNetIncome = memberProfiles.reduce((s, u) => s + u.estimated_monthly_net, 0);
+
+  const payload = {
+    export_metadata: {
+      exported_at: new Date().toISOString(),
+      date_range: { start: s, end: e },
+      currency: 'AUD',
+      app: 'Household Budget Tracker',
+    },
+    analysis_context: {
+      summary: 'Household budget data for Adam and Aruto in Sydney, Australia. All surplus income flows to an offset account linked to their mortgage to reduce interest. The offset balance earns effective interest at the mortgage rate (6.2%) rather than a savings account.',
+      core_spending_note: `"Core" spending excludes [${OUTLIER_CATEGORIES.join(', ')}] — these are lumpy, infrequent or fixed obligations. Core spending reflects day-to-day discretionary habits.`,
+      offset_strategy: 'Each payday, net pay minus retention (spending money kept) is transferred to the offset account. Mortgage is auto-debited from offset on the 23rd each month.',
+      key_metrics: {
+        total_spending_last_30d: Math.round(parseFloat(totalSpent30d.t) || 0),
+        core_spending_last_30d: Math.round(parseFloat(coreSpent30d.t) || 0),
+        avg_daily_core_spend_30d: Math.round((parseFloat(coreSpent30d.t) || 0) / 30),
+        total_monthly_budget: Math.round(totalMonthlyBudget),
+        core_monthly_budget: Math.round(coreMonthlyBudget),
+        estimated_monthly_net_income: Math.round(totalMonthlyNetIncome),
+        estimated_monthly_surplus: Math.round(totalMonthlyNetIncome - (parseFloat(totalSpent30d.t) || 0)),
+        mortgage_monthly: mortgageMonthly,
+        mortgage_rate_pct: 6.2,
+        offset_balance: offsetBal,
+        offset_interest_saved_annually: Math.round(annualInterestSaved),
+        offset_interest_saved_monthly: Math.round(annualInterestSaved / 12),
+      },
+      questions_you_can_ask: [
+        'How is our spending trending month over month?',
+        'Which categories are we consistently over/under budget on?',
+        'At current pace, when will each savings goal be reached?',
+        'How much are we saving vs how much could we save?',
+        'What would happen to our offset balance if we cut dining out by 30%?',
+        'Are there any unusual spending spikes worth investigating?',
+        'How does our actual spending compare to our income?',
+        'What is our effective savings rate?',
+      ],
+    },
+    household: {
+      members: memberProfiles,
+      mortgage_monthly_total: mortgageMonthly,
+      mortgage_rate_pct: 6.2,
+      budget_scale_pct: Math.round(budgetScale * 100),
+      levers: levers.map(l => ({ name: l.name, value: l.value, description: l.description })),
+    },
+    current_balances: currentBalances,
+    offset_balance_history: offsetHistory,
+    category_budgets: categoryBudgets,
+    savings_goals: savingsGoals,
+    income_entries: incomeEntries,
+    expenses,
+    upcoming_expenses: upcomingExpenses,
+    monthly_summaries: monthlySummaries,
+  };
+
+  res.setHeader('Content-Disposition', `attachment; filename=budget_ai_${e}.json`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(payload, null, 2));
+}));
+
 // ===================== PROJECTIONS =====================
 
 app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {

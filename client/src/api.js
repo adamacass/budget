@@ -155,6 +155,23 @@ export const downloadBackup = async () => {
 };
 export const restoreBackup = (backup) => apiFetch('/api/backup/restore', { method: 'POST', body: JSON.stringify({ backup }) });
 
+// AI Analysis Export
+export const exportForAI = async (params = {}) => {
+  const qs = new URLSearchParams(params).toString();
+  const token = localStorage.getItem('token');
+  const res = await fetch(`${API}/api/export/ai${qs ? '?' + qs : ''}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Export failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `budget_ai_${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
 // Export
 export const exportToExcel = async (params = {}) => {
   const qs = new URLSearchParams(params).toString();
