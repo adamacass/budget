@@ -55,6 +55,7 @@ export const getIncome = (params = {}) => {
   return apiFetch(`/api/income${qs ? '?' + qs : ''}`);
 };
 export const addIncome = (data) => apiFetch('/api/income', { method: 'POST', body: JSON.stringify(data) });
+export const deleteIncome = (id) => apiFetch(`/api/income/${id}`, { method: 'DELETE' });
 
 // Allocations
 export const getAllocations = () => apiFetch('/api/allocations');

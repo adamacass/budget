@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions, getUsers } from '../api';
-import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock, Users, Zap, Award, DollarSign, UserCircle } from 'lucide-react';
+import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions, getUsers, deleteIncome } from '../api';
+import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock, Users, Zap, Award, DollarSign, UserCircle, Trash2 } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtK(n) { return n >= 1000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
@@ -47,6 +47,7 @@ export default function PayDay() {
   // History
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   // Contributions breakdown
   const [contributions, setContributions] = useState(null);
   const [showContributions, setShowContributions] = useState(false);
@@ -167,6 +168,19 @@ export default function PayDay() {
       setUpcomingForm({ description: '', estimated_amount: '', expected_date: '', category: '', notes: '' });
       setShowAddUpcoming(false);
     } catch (err) { alert(err.message); }
+  }
+
+  async function handleDeleteIncome(entry) {
+    const label = `${entry.user_name} · ${entry.pay_date} · ${fmtMoney(entry.net_amount || entry.amount)}`;
+    if (!window.confirm(`Delete this income entry?\n\n${label}\n\nThis will reverse the offset balance and any goal allocations.`)) return;
+    setDeletingId(entry.id);
+    try {
+      await deleteIncome(entry.id);
+      setHistory(prev => prev.filter(h => h.id !== entry.id));
+      getBalances().then(setBalances).catch(console.error);
+      getGoals().then(setGoals).catch(console.error);
+    } catch (err) { alert('Delete failed: ' + err.message); }
+    setDeletingId(null);
   }
 
   // Sweep mode handlers
@@ -1277,6 +1291,15 @@ export default function PayDay() {
                           </div>
                         )}
                       </div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        style={{ flexShrink: 0, color: 'var(--text-muted)', opacity: deletingId === h.id ? 0.5 : 1 }}
+                        disabled={deletingId === h.id}
+                        onClick={() => handleDeleteIncome(h)}
+                        title="Delete this income entry"
+                      >
+                        {deletingId === h.id ? '...' : <Trash2 size={14} />}
+                      </button>
                     </div>
                   );
                 })}

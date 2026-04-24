@@ -401,6 +401,47 @@ app.post('/api/income', authMiddleware, asyncHandler(async (req, res) => {
   res.json(result.rows[0]);
 }));
 
+app.delete('/api/income/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Fetch the entry so we know how much to reverse
+    const entry = (await client.query('SELECT * FROM income_entries WHERE id = $1', [req.params.id])).rows[0];
+    if (!entry) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Income entry not found' }); }
+
+    // Reverse goal contributions
+    const contribs = (await client.query('SELECT goal_id, amount FROM goal_contributions WHERE income_entry_id = $1', [req.params.id])).rows;
+    for (const c of contribs) {
+      await client.query('UPDATE savings_goals SET current_amount = GREATEST(0, current_amount - $1) WHERE id = $2', [c.amount, c.goal_id]);
+    }
+    await client.query('DELETE FROM goal_contributions WHERE income_entry_id = $1', [req.params.id]);
+
+    // Remove fund allocations
+    await client.query('DELETE FROM fund_allocations WHERE income_entry_id = $1', [req.params.id]);
+
+    // Reverse offset balance if an offset transfer was recorded
+    const offsetTransfer = parseFloat(entry.offset_transfer) || 0;
+    if (offsetTransfer > 0) {
+      const current = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+      const newBalance = (current ? parseFloat(current.balance) : 0) - offsetTransfer;
+      await client.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', $1, $2)", [Math.max(0, newBalance), req.user.id]);
+    }
+
+    // Delete the income entry
+    await client.query('DELETE FROM income_entries WHERE id = $1', [req.params.id]);
+
+    await client.query('COMMIT');
+    res.json({ deleted: true, offset_reversed: offsetTransfer, goals_reversed: contribs.length });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
 // ===================== FUND ALLOCATION ROUTES =====================
 
 app.get('/api/allocations', authMiddleware, asyncHandler(async (req, res) => {
