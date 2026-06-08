@@ -150,10 +150,12 @@ app.get('/api/expenses', authMiddleware, asyncHandler(async (req, res) => {
 
 app.post('/api/expenses', authMiddleware, asyncHandler(async (req, res) => {
   const { category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring } = req.body;
+  const amt = parseFloat(String(amount || '').replace(/[$,]/g, ''));
+  if (!amt || isNaN(amt)) return res.status(400).json({ error: 'Invalid or missing amount' });
   const db = await getDb();
   const result = await db.query(
     'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
-    [req.user.id, category, subcategory || null, description || null, amount, expense_date, entry_type || 'actual', is_range ? 1 : 0, range_low || null, range_high || null, recurring ? 1 : 0]
+    [req.user.id, category, subcategory || null, description || null, amt, expense_date, entry_type || 'actual', is_range ? 1 : 0, range_low || null, range_high || null, recurring ? 1 : 0]
   );
   const expense = (await db.query('SELECT e.*, u.display_name as user_name FROM expenses e JOIN users u ON e.user_id = u.id WHERE e.id = $1', [result.rows[0].id])).rows[0];
   res.json(expense);
@@ -166,9 +168,11 @@ app.post('/api/expenses/batch', authMiddleware, asyncHandler(async (req, res) =>
   try {
     await client.query('BEGIN');
     for (const e of expenses) {
+      const amt = parseFloat(String(e.amount || '').replace(/[$,]/g, ''));
+      if (!amt || isNaN(amt)) continue;
       await client.query(
         'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
-        [req.user.id, e.category, e.subcategory || null, e.description || null, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range ? 1 : 0, e.range_low || null, e.range_high || null, e.recurring ? 1 : 0]
+        [req.user.id, e.category, e.subcategory || null, e.description || null, amt, e.expense_date, e.entry_type || 'actual', e.is_range ? 1 : 0, e.range_low || null, e.range_high || null, e.recurring ? 1 : 0]
       );
     }
     await client.query('COMMIT');
@@ -1261,12 +1265,14 @@ app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res)
   try {
     await client.query('BEGIN');
     for (const t of transactions) {
+      const amt = parseFloat(String(t.amount || '').replace(/[$,]/g, ''));
+      if (!amt || isNaN(amt)) { importSkipped++; continue; }
       // Check if previously deleted (persistent memory)
-      const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, t.amount, t.expense_date])).rows[0];
+      const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, amt, t.expense_date])).rows[0];
       if (parseInt(wasDeleted.cnt) > 0) { importSkipped++; continue; }
       await client.query(
         'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, NULL, 0)',
-        [req.user.id, t.category, t.source || 'credit_card_statement', t.description, t.amount, t.expense_date, t.entry_type || 'actual']
+        [req.user.id, t.category, t.source || 'credit_card_statement', t.description, amt, t.expense_date, t.entry_type || 'actual']
       );
     }
     await client.query('COMMIT');
@@ -1401,13 +1407,15 @@ app.post('/api/screenshots/import', authMiddleware, asyncHandler(async (req, res
       for (const t of transactions) {
         const date = parseDate(t.date);
         const category = t.category || autoCategorizeTxn(t.description);
-        const existing = (await client.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4', [userId, t.description, t.amount, date])).rows[0];
+        const amt = parseFloat(String(t.amount || '').replace(/[$,]/g, ''));
+        if (!amt || isNaN(amt)) { skipped++; continue; }
+        const existing = (await client.query('SELECT COUNT(*) as cnt FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4', [userId, t.description, amt, date])).rows[0];
         if (parseInt(existing.cnt) > 0) { skipped++; continue; }
         // Check if this was previously deleted (persistent memory)
-        const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, t.amount, date])).rows[0];
+        const wasDeleted = (await client.query('SELECT COUNT(*) as cnt FROM deleted_expenses WHERE description = $1 AND amount = $2 AND expense_date = $3', [t.description, amt, date])).rows[0];
         if (parseInt(wasDeleted.cnt) > 0) { skipped++; continue; }
         await client.query('INSERT INTO expenses (user_id, category, description, amount, expense_date, entry_type, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-          [userId, category, t.description, t.amount, date, 'actual', 0]);
+          [userId, category, t.description, amt, date, 'actual', 0]);
         added++;
       }
       await client.query('COMMIT');
