@@ -92,7 +92,7 @@ async function initSchema() {
       name TEXT NOT NULL,
       description TEXT,
       lever_type TEXT NOT NULL,
-      value REAL NOT NULL DEFAULT 0,
+      value TEXT NOT NULL DEFAULT '0',
       set_by INTEGER NOT NULL REFERENCES users(id),
       active INTEGER NOT NULL DEFAULT 1,
       created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -352,6 +352,9 @@ async function initSchema() {
     }
   }
 
+  // Migrate levers.value from REAL to TEXT so it can store dates and other text values
+  try { await pool.query("ALTER TABLE levers ALTER COLUMN value TYPE TEXT"); } catch(e) { /* already text */ }
+
   // Seed Mortgage Rate lever
   const mortgageRateLever = (await pool.query("SELECT id FROM levers WHERE name = 'Mortgage Rate' AND active = 1")).rows[0];
   if (!mortgageRateLever) {
@@ -359,7 +362,7 @@ async function initSchema() {
     if (adminUser2) {
       await pool.query(
         "INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ('Mortgage Rate', 'Annual mortgage interest rate (variable)', 'percentage', $1, $2)",
-        [6.24, adminUser2.id]
+        ['6.24', adminUser2.id]
       );
       console.log('Mortgage Rate lever seeded: 6.24%');
     }
