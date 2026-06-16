@@ -1849,9 +1849,10 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const weeklyBudget = totalMonthlyBudget * 12 / 52;
 
-  // Estimated monthly income from tax calc
+  // Estimated monthly income from tax calc (per-user)
   const allUsers = (await db.query('SELECT * FROM users')).rows;
   let totalAnnualNet = 0;
+  const incomeComparison = [];
   for (const u of allUsers) {
     const grossExSuper = u.gross_income / (1 + u.super_rate);
     let tax = 0;
@@ -1859,7 +1860,34 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     else if (grossExSuper > 135000) tax = 29467 + (grossExSuper - 135000) * 0.37;
     else if (grossExSuper > 45000) tax = 5092 + (grossExSuper - 45000) * 0.325;
     else if (grossExSuper > 18200) tax = (grossExSuper - 18200) * 0.19;
-    totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
+    const annualNet = grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
+    totalAnnualNet += annualNet;
+
+    // Actual income: average monthly from all recorded pay events
+    const incomeStats = (await db.query(
+      `SELECT SUM(COALESCE(net_amount, amount)) as total,
+              COUNT(*) as pay_count,
+              MIN(pay_date) as first_pay,
+              MAX(pay_date) as last_pay
+       FROM income_entries WHERE user_id = $1`, [u.id]
+    )).rows[0];
+    const actualTotal = parseFloat(incomeStats.total) || 0;
+    let actualMonthly = 0;
+    if (incomeStats.pay_count > 0 && incomeStats.first_pay) {
+      const first = new Date(incomeStats.first_pay);
+      const last = new Date(incomeStats.last_pay);
+      const msSpan = last - first;
+      const monthsSpan = msSpan / (1000 * 60 * 60 * 24 * 30.44);
+      actualMonthly = monthsSpan >= 1 ? actualTotal / monthsSpan : actualTotal;
+    }
+    incomeComparison.push({
+      user_id: u.id,
+      display_name: u.display_name,
+      estimated_monthly: Math.round(annualNet / 12),
+      actual_monthly: Math.round(actualMonthly),
+      pay_count: parseInt(incomeStats.pay_count) || 0,
+      pay_cycle: u.pay_cycle
+    });
   }
   const estimatedMonthlyIncome = totalAnnualNet / 12;
   const mortgage = await getMortgageMonthly(db);
@@ -1893,7 +1921,8 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     core_budgeted_expenses: Math.round(budgets.filter(b => !OUTLIER_CATEGORIES.includes(b.category)).reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0)),
     weekly_budget: Math.round(weeklyBudget),
     budget_by_category: budgets.map(b => ({ category: b.category, budget: Math.round(b.monthly_amount * budgetScale) })),
-    offset_history: offsetHistory
+    offset_history: offsetHistory,
+    income_comparison: incomeComparison
   });
 }));
 

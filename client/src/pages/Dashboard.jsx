@@ -641,6 +641,75 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ===== INCOME: ESTIMATED vs ACTUAL ===== */}
+      {data.income_comparison?.length > 0 && (() => {
+        const ic = data.income_comparison;
+        const totalEst = ic.reduce((s, u) => s + u.estimated_monthly, 0);
+        const totalAct = ic.reduce((s, u) => s + u.actual_monthly, 0);
+        const totalDiff = totalAct - totalEst;
+        const totalPct = totalEst > 0 ? Math.round((totalAct / totalEst) * 100) : 0;
+        const hasData = ic.some(u => u.pay_count > 0);
+
+        return (
+          <div className="card" style={{ marginBottom: '1rem' }}>
+            <div className="card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span><DollarSign size={14} /> Income: Estimated vs Actual</span>
+              {hasData && <span style={{ fontSize: '0.72rem', fontWeight: 400, color: totalDiff >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {totalPct}% of estimate
+              </span>}
+            </div>
+            {!hasData ? (
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '0.5rem 0' }}>
+                No pay events recorded yet. Log a payday to start tracking accuracy.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                {ic.map(u => {
+                  const diff = u.actual_monthly - u.estimated_monthly;
+                  const pct = u.estimated_monthly > 0 ? Math.round((u.actual_monthly / u.estimated_monthly) * 100) : 0;
+                  const barPct = u.estimated_monthly > 0 ? Math.min(120, (u.actual_monthly / u.estimated_monthly) * 100) : 0;
+                  return (
+                    <div key={u.user_id}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                        <span style={{ fontWeight: 600, fontSize: '0.82rem', color: getUserColor(u.display_name) }}>{u.display_name}</span>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{u.pay_count} pay{u.pay_count !== 1 ? 's' : ''} recorded</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', marginBottom: 4 }}>
+                        <span>Est: <strong>{fmtMoney(u.estimated_monthly)}</strong>/mo</span>
+                        <span>Actual: <strong style={{ color: diff >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(u.actual_monthly)}</strong>/mo</span>
+                        <span style={{ color: diff >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+                          {diff >= 0 ? '+' : ''}{fmtMoney(diff)} ({pct}%)
+                        </span>
+                      </div>
+                      <div className="progress-bar" style={{ height: 8 }}>
+                        <div className={`progress-fill ${pct >= 95 && pct <= 105 ? 'green' : pct < 95 ? 'red' : 'yellow'}`}
+                          style={{ width: `${Math.min(100, barPct)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                {ic.length > 1 && (
+                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.5rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                      <span><strong>Combined</strong></span>
+                      <span>
+                        Est: <strong>{fmtMoney(totalEst)}</strong> vs Actual: <strong style={{ color: totalDiff >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(totalAct)}</strong>
+                        <span style={{ color: totalDiff >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600, marginLeft: 6 }}>
+                          {totalDiff >= 0 ? '+' : ''}{fmtMoney(totalDiff)}
+                        </span>
+                      </span>
+                    </div>
+                  </div>
+                )}
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                  Estimate uses profile gross income with AU tax brackets. Adjust gross income, super rate, or HECS in Settings → Profile if the estimate is off.
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       {/* ===== DAILY SPENDING ===== */}
       {(() => {
         const chartData = spendingData || insights?.daily_spending || [];
