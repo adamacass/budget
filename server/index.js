@@ -2423,7 +2423,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   // ── Savings rate from actual data ──
   const threeMonthsAgo = clampDate(new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]);
   const recentIncome = (await db.query('SELECT SUM(offset_transfer) as total FROM income_entries WHERE pay_date >= $1', [threeMonthsAgo])).rows[0];
-  const recentMortgageDebits = (await db.query("SELECT COUNT(*) as cnt FROM fund_allocations WHERE allocation_type = 'mortgage_debit' AND allocated_date >= $1", [threeMonthsAgo])).rows[0];
+  const recentMortgageDebits = (await db.query("SELECT COUNT(*) as cnt FROM fund_allocations WHERE notes LIKE 'Mortgage%' AND allocated_date >= $1", [threeMonthsAgo])).rows[0];
   const mortgageDebitsInPeriod = parseInt(recentMortgageDebits.cnt) || 0;
   const totalAddedToOffset = parseFloat(recentIncome.total) || 0;
   const totalDebitedFromOffset = mortgageDebitsInPeriod * mc.monthlyPayment;
