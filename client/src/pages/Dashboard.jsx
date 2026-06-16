@@ -16,13 +16,14 @@ function MortgageProjectionChart({ mortgageConfig: mc, offsetBalance, monthlySur
   const [withdrawal, setWithdrawal] = useState('');
   const [horizon, setHorizon] = useState(10);
 
-  const rate = (parseFloat(rateOverride) || mc.ratePercent || 6.24) / 100;
-  const monthlyRate = rate / 12;
+  const actualRate = (mc.ratePercent || 6.24) / 100;
+  const actualMonthlyRate = actualRate / 12;
   const payment = mc.monthlyPayment || mortgagePayment || 4656.64;
   const termMonths = (mc.termYears || 30) * 12;
 
-  const principal = monthlyRate > 0
-    ? payment * (1 - Math.pow(1 + monthlyRate, -termMonths)) / monthlyRate
+  // Principal and current balance use the actual rate (history doesn't change)
+  const principal = actualMonthlyRate > 0
+    ? payment * (1 - Math.pow(1 + actualMonthlyRate, -termMonths)) / actualMonthlyRate
     : payment * termMonths;
 
   const mortgageStart = new Date((mc.startDate || '2025-11-23') + 'T00:00:00');
@@ -31,9 +32,13 @@ function MortgageProjectionChart({ mortgageConfig: mc, offsetBalance, monthlySur
 
   let currentBalance = principal;
   for (let m = 0; m < monthsElapsed && currentBalance > 0; m++) {
-    const interest = currentBalance * monthlyRate;
+    const interest = currentBalance * actualMonthlyRate;
     currentBalance -= Math.min(payment - interest, currentBalance);
   }
+
+  // Forward projection uses the overridden rate (what-if)
+  const projRate = (parseFloat(rateOverride) || mc.ratePercent || 6.24) / 100;
+  const projMonthlyRate = projRate / 12;
 
   const monthlySavings = savingsOverride !== '' ? parseFloat(savingsOverride) || 0 : monthlySurplus;
   const netMonthlyGrowth = monthlySavings - payment;
@@ -51,12 +56,12 @@ function MortgageProjectionChart({ mortgageConfig: mc, offsetBalance, monthlySur
 
     if (m > 0) {
       if (balNoOff > 0) {
-        const intNo = balNoOff * monthlyRate;
+        const intNo = balNoOff * projMonthlyRate;
         balNoOff = Math.max(0, balNoOff - Math.min(payment - intNo, balNoOff));
       }
       if (projBal > 0) {
         const effBal = Math.max(0, projBal - projOff);
-        const interest = effBal * monthlyRate;
+        const interest = effBal * projMonthlyRate;
         projBal = Math.max(0, projBal - Math.min(payment - interest, projBal));
         projOff = Math.max(0, projOff + monthlySavings - payment);
         if (projBal <= 0 && !payoffMonth) payoffMonth = m;
