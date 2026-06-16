@@ -10,6 +10,152 @@ function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFr
 function fmtMoney2(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtK(n) { return n >= 10000 ? '$' + (n / 1000).toFixed(0) + 'k' : fmtMoney(n); }
 
+function MortgageProjectionChart({ mortgageConfig: mc, offsetBalance, monthlySurplus, mortgagePayment }) {
+  const [savingsOverride, setSavingsOverride] = useState('');
+  const [rateOverride, setRateOverride] = useState('');
+  const [withdrawal, setWithdrawal] = useState('');
+  const [horizon, setHorizon] = useState(10);
+
+  const rate = (parseFloat(rateOverride) || mc.ratePercent || 6.24) / 100;
+  const monthlyRate = rate / 12;
+  const payment = mc.monthlyPayment || mortgagePayment || 4656.64;
+  const termMonths = (mc.termYears || 30) * 12;
+
+  const principal = monthlyRate > 0
+    ? payment * (1 - Math.pow(1 + monthlyRate, -termMonths)) / monthlyRate
+    : payment * termMonths;
+
+  const mortgageStart = new Date((mc.startDate || '2025-11-23') + 'T00:00:00');
+  const now = new Date();
+  const monthsElapsed = (now.getFullYear() - mortgageStart.getFullYear()) * 12 + (now.getMonth() - mortgageStart.getMonth());
+
+  let currentBalance = principal;
+  for (let m = 0; m < monthsElapsed && currentBalance > 0; m++) {
+    const interest = currentBalance * monthlyRate;
+    currentBalance -= Math.min(payment - interest, currentBalance);
+  }
+
+  const monthlySavings = savingsOverride !== '' ? parseFloat(savingsOverride) || 0 : monthlySurplus;
+  const netMonthlyGrowth = monthlySavings - payment;
+  const lumpWithdrawal = parseFloat(withdrawal) || 0;
+
+  const projData = [];
+  let projBal = currentBalance;
+  let projOff = Math.max(0, offsetBalance - lumpWithdrawal);
+  let balNoOff = currentBalance;
+  let payoffMonth = null;
+
+  for (let m = 0; m <= horizon * 12; m++) {
+    const date = new Date(); date.setMonth(date.getMonth() + m);
+    const label = date.toISOString().substring(0, 7);
+
+    if (m > 0) {
+      if (balNoOff > 0) {
+        const intNo = balNoOff * monthlyRate;
+        balNoOff = Math.max(0, balNoOff - Math.min(payment - intNo, balNoOff));
+      }
+      if (projBal > 0) {
+        const effBal = Math.max(0, projBal - projOff);
+        const interest = effBal * monthlyRate;
+        projBal = Math.max(0, projBal - Math.min(payment - interest, projBal));
+        projOff = Math.max(0, projOff + monthlySavings - payment);
+        if (projBal <= 0 && !payoffMonth) payoffMonth = m;
+      }
+    }
+
+    if (m % (horizon <= 5 ? 1 : horizon <= 15 ? 3 : 6) === 0 || m === horizon * 12) {
+      projData.push({ month: label, offset: Math.round(projOff), mortgage: Math.round(projBal), no_offset: Math.round(balNoOff) });
+    }
+  }
+
+  const origPayoff = new Date(mortgageStart); origPayoff.setMonth(origPayoff.getMonth() + termMonths);
+  const projPayoff = payoffMonth ? new Date(new Date().setMonth(new Date().getMonth() + payoffMonth)) : origPayoff;
+  const timeSavedMonths = payoffMonth ? Math.max(0, (termMonths - monthsElapsed) - payoffMonth) : 0;
+  const timeSavedYr = Math.floor(timeSavedMonths / 12);
+  const timeSavedMo = timeSavedMonths % 12;
+
+  return (
+    <div className="card" style={{ marginBottom: '1rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
+        <div className="card-title" style={{ margin: 0 }}>
+          <TrendingUp size={14} /> Offset vs Mortgage
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[5, 10, 15, 20, 30].map(y => (
+            <button key={y} className={`btn btn-sm ${horizon === y ? 'btn-primary' : 'btn-ghost'}`}
+              style={{ padding: '2px 8px', fontSize: '0.7rem' }}
+              onClick={() => setHorizon(y)}>{y}yr</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary stats */}
+      <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.75rem', fontSize: '0.8rem' }}>
+        <div><span style={{ color: 'var(--text-muted)' }}>Payoff: </span>
+          <strong style={{ color: 'var(--green)' }}>{projPayoff.toLocaleDateString('en-AU', { month: 'short', year: 'numeric' })}</strong>
+          <span style={{ color: 'var(--text-muted)' }}> (was {origPayoff.toLocaleDateString('en-AU', { month: 'short', year: 'numeric' })})</span>
+        </div>
+        {timeSavedMonths > 0 && <div><span style={{ color: 'var(--text-muted)' }}>Saving: </span>
+          <strong style={{ color: 'var(--green)' }}>{timeSavedYr > 0 ? `${timeSavedYr}yr ${timeSavedMo}mo` : `${timeSavedMo}mo`}</strong>
+        </div>}
+        <div><span style={{ color: 'var(--text-muted)' }}>Net offset growth: </span>
+          <strong style={{ color: netMonthlyGrowth >= 0 ? 'var(--green)' : 'var(--red)' }}>{netMonthlyGrowth >= 0 ? '+' : ''}{fmtMoney(netMonthlyGrowth)}/mo</strong>
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+        <div style={{ flex: '1 1 120px' }}>
+          <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: 2 }}>Monthly savings ($)</label>
+          <input className="form-input" type="number" step="100"
+            placeholder={`${Math.round(monthlySurplus)} (auto)`}
+            value={savingsOverride}
+            onChange={e => setSavingsOverride(e.target.value)}
+            style={{ padding: '4px 8px', fontSize: '0.8rem' }} />
+        </div>
+        <div style={{ flex: '1 1 100px' }}>
+          <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: 2 }}>Interest rate (%)</label>
+          <input className="form-input" type="number" step="0.01"
+            placeholder={`${mc.ratePercent || 6.24} (current)`}
+            value={rateOverride}
+            onChange={e => setRateOverride(e.target.value)}
+            style={{ padding: '4px 8px', fontSize: '0.8rem' }} />
+        </div>
+        <div style={{ flex: '1 1 120px' }}>
+          <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: 2 }}>Planned withdrawal ($)</label>
+          <input className="form-input" type="number" step="1000"
+            placeholder="0"
+            value={withdrawal}
+            onChange={e => setWithdrawal(e.target.value)}
+            style={{ padding: '4px 8px', fontSize: '0.8rem' }} />
+        </div>
+        {(savingsOverride !== '' || rateOverride !== '' || withdrawal !== '') && (
+          <div style={{ flex: '0 0 auto', alignSelf: 'flex-end' }}>
+            <button className="btn btn-ghost btn-sm" style={{ padding: '4px 8px', fontSize: '0.7rem' }}
+              onClick={() => { setSavingsOverride(''); setRateOverride(''); setWithdrawal(''); }}>Reset</button>
+          </div>
+        )}
+      </div>
+
+      <ResponsiveContainer width="100%" height={280}>
+        <ComposedChart data={projData}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+          <XAxis dataKey="month" tick={{ fill: '#8b8fa3', fontSize: 10 }} interval={Math.max(1, Math.floor(projData.length / 10))} />
+          <YAxis tick={{ fill: '#8b8fa3', fontSize: 10 }} tickFormatter={v => fmtK(v)} />
+          <Tooltip
+            contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }}
+            formatter={(v, name) => [fmtMoney(v), name]}
+          />
+          <Legend />
+          <Area type="monotone" dataKey="offset" stroke="#6c5ce7" fill="rgba(108,92,231,0.12)" strokeWidth={2} name="Offset" dot={false} />
+          <Line type="monotone" dataKey="mortgage" stroke="#d63031" strokeWidth={2} name="Mortgage (with offset)" dot={false} />
+          <Line type="monotone" dataKey="no_offset" stroke="#636e72" strokeWidth={1} strokeDasharray="6 3" name="Mortgage (no offset)" dot={false} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -321,6 +467,14 @@ export default function Dashboard() {
           </ResponsiveContainer>
         </div>
       )}
+
+      {/* ===== MORTGAGE PROJECTION CHART (interactive) ===== */}
+      {data.mortgage_config && <MortgageProjectionChart
+        mortgageConfig={data.mortgage_config}
+        offsetBalance={offsetBalance}
+        monthlySurplus={monthlySurplus}
+        mortgagePayment={data.mortgage_monthly}
+      />}
 
       {/* ===== ARUTO BANNER ===== */}
       {user?.username === 'aruto' && !dismissedBanner && (

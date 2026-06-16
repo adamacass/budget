@@ -1886,6 +1886,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     users,
     mortgage_monthly: mortgage,
     mortgage_rate: await getMortgageRate(db),
+    mortgage_config: await getMortgageConfig(db),
     estimated_monthly_income: Math.round(estimatedMonthlyIncome),
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
@@ -2382,14 +2383,14 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
       balNoOff = Math.max(0, balNoOff - princNoOff);
     }
 
-    // With offset path
+    // With offset path — surplus flows in, mortgage payment flows out
     if (projBalance > 0) {
       const effectiveBalance = Math.max(0, projBalance - projOffset);
       const interest = effectiveBalance * mc.monthlyRate;
       totalInterestWithOffset += interest;
       const principalPaid = Math.min(mc.monthlyPayment - interest, projBalance);
       projBalance = Math.max(0, projBalance - principalPaid);
-      projOffset += Math.max(0, monthlySurplus);
+      projOffset = Math.max(0, projOffset + monthlySurplus - mc.monthlyPayment);
       if (projBalance <= 0 && !payoffMonth) payoffMonth = m;
     }
 
@@ -2448,7 +2449,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
       totalInt += interest;
       const princPaid = Math.min(mc.monthlyPayment - interest, bal);
       bal = Math.max(0, bal - princPaid);
-      off += Math.max(0, adjustedSurplus);
+      off = Math.max(0, off + adjustedSurplus - mc.monthlyPayment);
       if (bal <= 0 && !pm) pm = m;
     }
     const intSaved = totalInterestNoOffset - totalInt;
