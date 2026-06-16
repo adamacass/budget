@@ -132,6 +132,10 @@ export const getDailySpending = (days = 14) => apiFetch(`/api/daily-spending?day
 // Payday Events (for chart overlays)
 export const getPaydayEvents = (days = 14) => apiFetch(`/api/payday-events?days=${days}`);
 
+// Mortgage Config
+export const getMortgageConfig = () => apiFetch('/api/mortgage-config');
+export const updateMortgageConfig = (data) => apiFetch('/api/mortgage-config', { method: 'PUT', body: JSON.stringify(data) });
+
 // Projections
 export const getProjections = (params = {}) => {
   const qs = new URLSearchParams(params).toString();

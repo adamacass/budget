@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions, getUsers } from '../api';
+import { getIncome, getBalances, getRetention, getAccountSweepAdvice, getUpcomingExpenses, addUpcomingExpense, resolveUpcomingExpense, completePayDay, getGoals, getOffsetContributions, getUsers, getMortgageConfig } from '../api';
 import { Wallet, CheckCircle, Plus, X, ArrowRightLeft, TrendingUp, Shield, Target, ChevronDown, ChevronUp, Home, Clock, Users, Zap, Award, DollarSign, UserCircle } from 'lucide-react';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -65,6 +65,11 @@ export default function PayDay() {
   const [adhocIsSurplus, setAdhocIsSurplus] = useState(true);
   const [adhocGoalAllocations, setAdhocGoalAllocations] = useState({});
   const [adhocSaved, setAdhocSaved] = useState(false);
+  const [mortgageRate, setMortgageRate] = useState(0.0624);
+
+  useEffect(() => {
+    getMortgageConfig().then(c => setMortgageRate((c.ratePercent || 6.24) / 100)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     getBalances().then(setBalances).catch(console.error);
@@ -109,7 +114,7 @@ export default function PayDay() {
     } catch (err) { alert(err.message); }
   }
 
-  const RATE = 0.062;
+  const RATE = mortgageRate;
   const effectiveRetention = parseFloat(retentionOverride) || 0;
   const mortgagePerPeriod = retention?.mortgage_per_period || 0;
   const totalToOffset = Math.max(0, parseFloat(netPay) - effectiveRetention);
@@ -535,7 +540,7 @@ export default function PayDay() {
 
           {/* Encouragement */}
           <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'rgba(0,184,148,0.08)', borderRadius: 8, border: '1px solid rgba(0,184,148,0.2)', fontSize: '0.85rem', color: 'var(--green)' }}>
-            Every dollar in offset saves you 6.2% in mortgage interest. Maximise your transfer — keep retention as low as you can comfortably manage.
+            Every dollar in offset saves you {(RATE * 100).toFixed(2)}% in mortgage interest. Maximise your transfer — keep retention as low as you can comfortably manage.
           </div>
 
           {/* Upcoming expenses */}
@@ -721,7 +726,7 @@ export default function PayDay() {
 
           {/* Encouragement */}
           <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'rgba(0,184,148,0.08)', borderRadius: 8, border: '1px solid rgba(0,184,148,0.2)', fontSize: '0.85rem', color: 'var(--green)' }}>
-            Every dollar in offset saves you 6.2% in mortgage interest. The more you transfer, the faster you pay off the mortgage.
+            Every dollar in offset saves you {(RATE * 100).toFixed(2)}% in mortgage interest. The more you transfer, the faster you pay off the mortgage.
           </div>
 
           <div className="btn-group" style={{ marginTop: '1rem' }}>

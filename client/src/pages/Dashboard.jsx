@@ -217,7 +217,7 @@ export default function Dashboard() {
             <div className="offset-hero-label"><DollarSign size={16} /> Offset Account</div>
             <div className="offset-hero-amount">{fmtMoney(offsetBalance)}</div>
             <div className="offset-hero-sub">
-              Saving ~{fmtMoney(Math.round(offsetBalance * 0.062 / 12))}/mo in mortgage interest
+              Saving ~{fmtMoney(Math.round(offsetBalance * (data.mortgage_rate || 0.0624) / 12))}/mo in mortgage interest
             </div>
           </div>
           <div className="offset-hero-stats">
@@ -230,7 +230,7 @@ export default function Dashboard() {
               <span className="offset-hero-stat-label">Mortgage/mo</span>
             </div>
             <div className="offset-hero-stat">
-              <span className="offset-hero-stat-value">6.2%</span>
+              <span className="offset-hero-stat-value">{((data.mortgage_rate || 0.0624) * 100).toFixed(2)}%</span>
               <span className="offset-hero-stat-label">Rate</span>
             </div>
           </div>

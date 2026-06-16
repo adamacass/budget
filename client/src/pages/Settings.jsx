@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getBalances, updateBalance, exportToExcel, exportForAI, downloadBackup, restoreBackup, getCategoryRules, deleteCategoryRule } from '../api';
-import { Save, Download, Key, User, DollarSign, Database, Upload, Smartphone, Tag, Trash2, Copy } from 'lucide-react';
+import { getBalances, updateBalance, exportToExcel, exportForAI, downloadBackup, restoreBackup, getCategoryRules, deleteCategoryRule, getMortgageConfig, updateMortgageConfig } from '../api';
+import { Save, Download, Key, User, DollarSign, Database, Upload, Smartphone, Tag, Trash2, Copy, Home } from 'lucide-react';
 import { CATEGORIES, getCategoryColor } from '../categoryColors';
 
 function fmtMoney(n) { return '$' + (n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -32,6 +32,10 @@ export default function Settings() {
     end: new Date().toISOString().split('T')[0]
   });
 
+  // Mortgage config
+  const [mortgageConfig, setMortgageConfig] = useState({ rate: 6.24, monthly_payment: 4656.64, start_date: '2025-11-23', term_years: 30 });
+  const [mortgageMsg, setMortgageMsg] = useState('');
+
   // Category rules
   const [rules, setRules] = useState([]);
   const [rulesLoading, setRulesLoading] = useState(false);
@@ -44,6 +48,19 @@ export default function Settings() {
     if (tab === 'rules') {
       setRulesLoading(true);
       getCategoryRules().then(setRules).catch(console.error).finally(() => setRulesLoading(false));
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab === 'mortgage') {
+      getMortgageConfig().then(c => {
+        setMortgageConfig({
+          rate: c.ratePercent || 6.24,
+          monthly_payment: c.monthlyPayment || 4656.64,
+          start_date: c.startDate || '2025-11-23',
+          term_years: c.termYears || 30
+        });
+      }).catch(console.error);
     }
   }, [tab]);
 
@@ -100,6 +117,9 @@ export default function Settings() {
         </button>
         <button className={`tab ${tab === 'accounts' ? 'active' : ''}`} onClick={() => setTab('accounts')}>
           <DollarSign size={14} style={{ marginRight: 4 }} /> Account Balances
+        </button>
+        <button className={`tab ${tab === 'mortgage' ? 'active' : ''}`} onClick={() => setTab('mortgage')}>
+          <Home size={14} style={{ marginRight: 4 }} /> Mortgage
         </button>
         <button className={`tab ${tab === 'security' ? 'active' : ''}`} onClick={() => setTab('security')}>
           <Key size={14} style={{ marginRight: 4 }} /> Security
@@ -220,6 +240,77 @@ export default function Settings() {
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {tab === 'mortgage' && (
+        <div className="card">
+          <div className="card-title"><Home size={14} /> Mortgage Settings</div>
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+            Configure your mortgage details. These are used across the app for interest calculations, projections, and offset impact.
+          </p>
+          {mortgageMsg && <div className={mortgageMsg.startsWith('Error') ? 'error-msg' : 'success-msg'}>{mortgageMsg}</div>}
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              await updateMortgageConfig(mortgageConfig);
+              setMortgageMsg('Mortgage settings saved!');
+              setTimeout(() => setMortgageMsg(''), 3000);
+            } catch (err) { setMortgageMsg('Error: ' + err.message); }
+          }}>
+            <div className="form-row">
+              <div className="form-group">
+                <label>Interest Rate (% p.a.)</label>
+                <input className="form-input" type="number" step="0.01" min="0" max="20"
+                  value={mortgageConfig.rate}
+                  onChange={e => setMortgageConfig({ ...mortgageConfig, rate: parseFloat(e.target.value) || 0 })} />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>Current variable rate</div>
+              </div>
+              <div className="form-group">
+                <label>Monthly Payment ($)</label>
+                <input className="form-input" type="number" step="0.01" min="0"
+                  value={mortgageConfig.monthly_payment}
+                  onChange={e => setMortgageConfig({ ...mortgageConfig, monthly_payment: parseFloat(e.target.value) || 0 })} />
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>Minimum repayment auto-debited on 23rd</div>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>First Payment Date</label>
+                <input className="form-input" type="date"
+                  value={mortgageConfig.start_date}
+                  onChange={e => setMortgageConfig({ ...mortgageConfig, start_date: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label>Loan Term (years)</label>
+                <input className="form-input" type="number" step="1" min="1" max="40"
+                  value={mortgageConfig.term_years}
+                  onChange={e => setMortgageConfig({ ...mortgageConfig, term_years: parseInt(e.target.value) || 30 })} />
+              </div>
+            </div>
+            <div className="card" style={{ background: 'var(--bg-input)', marginTop: '0.5rem' }}>
+              <div className="card-title">Estimated Loan Summary</div>
+              {(() => {
+                const r = (mortgageConfig.rate || 0) / 100 / 12;
+                const n = (mortgageConfig.term_years || 30) * 12;
+                const pmt = mortgageConfig.monthly_payment || 0;
+                const principal = r > 0 ? pmt * (1 - Math.pow(1 + r, -n)) / r : pmt * n;
+                const totalCost = pmt * n;
+                const totalInterest = totalCost - principal;
+                return (
+                  <div style={{ fontSize: '0.85rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                    <span>Estimated principal:</span><span style={{ fontWeight: 600 }}>{fmtMoney(principal)}</span>
+                    <span>Total repayments:</span><span>{fmtMoney(totalCost)}</span>
+                    <span>Total interest (no offset):</span><span style={{ color: 'var(--red)' }}>{fmtMoney(totalInterest)}</span>
+                    <span>Monthly rate:</span><span>{((mortgageConfig.rate || 0) / 12).toFixed(3)}%</span>
+                  </div>
+                );
+              })()}
+            </div>
+            <button className="btn btn-primary" type="submit" style={{ marginTop: '1rem' }}>
+              <Save size={14} /> Save Mortgage Settings
+            </button>
+          </form>
         </div>
       )}
 

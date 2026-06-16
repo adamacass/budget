@@ -9,7 +9,7 @@ function getClient() {
   return client;
 }
 
-async function getPayDayAdvice({ user, netPay, retentionData, offsetBalance, goals, recentExpenses, upcomingExpenses }) {
+async function getPayDayAdvice({ user, netPay, retentionData, offsetBalance, goals, recentExpenses, upcomingExpenses, mortgageRate, mortgagePayment }) {
   const anthropic = getClient();
   if (!anthropic) return { advice: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
 
@@ -39,7 +39,7 @@ OFFSET-CENTRIC MODEL: All surplus cash goes to the mortgage offset account to re
 CONTEXT:
 - User: ${user.display_name} (${user.pay_cycle} pay cycle, $${user.gross_income.toLocaleString()} gross p.a.)
 - Just received net pay: $${netPay.toFixed(2)}
-- Mortgage: $4,656.64/month (auto-debited from offset by bank on 23rd)
+- Mortgage: $${mortgagePayment.toLocaleString()}/month (auto-debited from offset by bank on 23rd)
 
 RETENTION CALCULATION:
 - System-calculated retention: $${(retentionData?.calculated_retention || 0).toFixed(2)} (what ${user.display_name} keeps for expenses)
@@ -51,7 +51,7 @@ ${retentionBreakdown}
 SURPLUS TO OFFSET: $${surplus.toFixed(2)} (net pay minus retention)
 
 OFFSET ACCOUNT: $${(offsetBalance || 0).toLocaleString()} current balance
-At 6.2% mortgage rate, this saves ~$${Math.round((offsetBalance || 0) * 0.062 / 12)}/month in interest
+At ${(mortgageRate * 100).toFixed(2)}% mortgage rate, this saves ~$${Math.round((offsetBalance || 0) * mortgageRate / 12)}/month in interest
 
 SAVINGS GOALS (virtual buckets within offset):
 ${goalsText || 'None set'}
@@ -90,7 +90,7 @@ Provide your response as:
   }
 }
 
-async function getNightlySummary({ expenses, incomes, offsetBalance, goals, period }) {
+async function getNightlySummary({ expenses, incomes, offsetBalance, goals, period, mortgageRate, mortgagePayment }) {
   const anthropic = getClient();
   if (!anthropic) return { summary: 'Claude API key not configured.' };
 
@@ -114,8 +114,8 @@ async function getNightlySummary({ expenses, incomes, offsetBalance, goals, peri
 
   const totalGoalAllocated = goals.reduce((s, g) => s + g.current_amount, 0);
   const unallocatedOffset = (offsetBalance || 0) - totalGoalAllocated;
-  const mortgageRate = 0.062;
-  const monthlyInterestSaved = ((offsetBalance || 0) * mortgageRate) / 12;
+  const effectiveMortgageRate = mortgageRate || 0.0624;
+  const monthlyInterestSaved = ((offsetBalance || 0) * effectiveMortgageRate) / 12;
 
   const prompt = `You are a sharp, honest household financial advisor for a Sydney couple. Give a nightly review focused on offset account growth.
 
@@ -131,7 +131,7 @@ ${catText || 'No expenses recorded'}
 
 OFFSET ACCOUNT: $${(offsetBalance || 0).toLocaleString()}
 - Interest saved: ~$${Math.round(monthlyInterestSaved)}/month ($${Math.round(monthlyInterestSaved * 12)}/year)
-- Mortgage: $4,656.64/month (auto-debited from offset)
+- Mortgage: $${(mortgagePayment || 4656.64).toLocaleString()}/month (auto-debited from offset)
 - Goals allocated within offset: $${totalGoalAllocated.toFixed(0)}
 - Unallocated offset: $${unallocatedOffset.toFixed(0)}
 
@@ -163,7 +163,7 @@ Be constructive but honest. Focus on how spending impacts offset growth.
   }
 }
 
-async function getAccountSweepAdvice({ user, transactionBalance, offsetBalance, goals, recentExpenses, upcomingExpenses, budgets, budgetScale }) {
+async function getAccountSweepAdvice({ user, transactionBalance, offsetBalance, goals, recentExpenses, upcomingExpenses, budgets, budgetScale, mortgageRate, mortgagePayment }) {
   const anthropic = getClient();
   if (!anthropic) return { advice: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
 
@@ -194,7 +194,7 @@ CONTEXT:
 - This is NOT payday — reviewing what's in the transaction account
 
 OFFSET ACCOUNT: $${(offsetBalance || 0).toLocaleString()}
-At 6.2% rate, every $1,000 in offset saves ~$62/year in interest
+At ${((mortgageRate || 0.0624) * 100).toFixed(2)}% rate, every $1,000 in offset saves ~$${Math.round((mortgageRate || 0.0624) * 1000)}/year in interest
 
 MONTHLY BUDGET STATUS (${Math.round(monthProgress * 100)}% through month):
 - Budget: $${Math.round(totalBudget)}/month

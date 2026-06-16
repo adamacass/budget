@@ -30,6 +30,31 @@ async function getMortgageMonthly(db) {
   return parseFloat(row?.total) || 0;
 }
 
+async function getMortgageRate(db) {
+  const lever = (await db.query("SELECT value FROM levers WHERE name = 'Mortgage Rate' AND active = 1 LIMIT 1")).rows[0];
+  if (lever) return parseFloat(lever.value) / 100;
+  return 0.0624;
+}
+
+async function getMortgageConfig(db) {
+  const levers = (await db.query("SELECT name, value FROM levers WHERE active = 1 AND name LIKE 'Mortgage%'")).rows;
+  const find = (name) => levers.find(l => l.name === name);
+
+  const ratePercent = parseFloat(find('Mortgage Rate')?.value) || 6.24;
+  const rate = ratePercent / 100;
+  const monthlyPayment = parseFloat(find('Mortgage Monthly')?.value) || 4656.64;
+  const startDate = find('Mortgage Start Date')?.value || '2025-11-23';
+  const termYears = parseFloat(find('Mortgage Term Years')?.value) || 30;
+  const termMonths = termYears * 12;
+  const monthlyRate = rate / 12;
+
+  const principal = monthlyRate > 0
+    ? monthlyPayment * (1 - Math.pow(1 + monthlyRate, -termMonths)) / monthlyRate
+    : monthlyPayment * termMonths;
+
+  return { rate, ratePercent, monthlyRate, monthlyPayment, startDate, termYears, termMonths, principal };
+}
+
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
@@ -1115,8 +1140,10 @@ app.post('/api/claude/payday-advice', authMiddleware, asyncHandler(async (req, r
   const upcomingExpenses = (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
   try {
+    const mortgageRate = await getMortgageRate(db);
+    const mortgagePayment = await getMortgageMonthly(db);
     const result = await getPayDayAdvice({
-      user, netPay: net_pay, retentionData: retention_data, offsetBalance, goals, recentExpenses, upcomingExpenses
+      user, netPay: net_pay, retentionData: retention_data, offsetBalance, goals, recentExpenses, upcomingExpenses, mortgageRate, mortgagePayment
     });
     await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
       ['payday', result.advice, JSON.stringify({ net_pay, user_id: req.user.id })]
@@ -1145,8 +1172,10 @@ app.post('/api/claude/account-sweep', authMiddleware, asyncHandler(async (req, r
   const upcomingExpenses = (await db.query('SELECT * FROM upcoming_expenses WHERE resolved = 0 ORDER BY expected_date ASC')).rows;
 
   try {
+    const mortgageRate = await getMortgageRate(db);
+    const mortgagePayment = await getMortgageMonthly(db);
     const result = await getAccountSweepAdvice({
-      user, transactionBalance: transaction_balance, offsetBalance, goals, recentExpenses, upcomingExpenses, budgets, budgetScale
+      user, transactionBalance: transaction_balance, offsetBalance, goals, recentExpenses, upcomingExpenses, budgets, budgetScale, mortgageRate, mortgagePayment
     });
     await db.query('INSERT INTO claude_advice (advice_type, content, context_data) VALUES ($1, $2, $3)',
       ['account-sweep', result.advice, JSON.stringify({ transaction_balance, user_id: req.user.id })]
@@ -1342,8 +1371,10 @@ app.post('/api/claude/nightly-summary', authMiddleware, asyncHandler(async (req,
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
 
   try {
+    const mortgageRate = await getMortgageRate(db);
+    const mortgagePayment = await getMortgageMonthly(db);
     const result = await getNightlySummary({
-      expenses, incomes, offsetBalance, goals, period: `${thirtyDaysAgo} to ${today}`
+      expenses, incomes, offsetBalance, goals, period: `${thirtyDaysAgo} to ${today}`, mortgageRate, mortgagePayment
     });
     await db.query('INSERT INTO claude_advice (advice_type, content) VALUES ($1, $2)', ['nightly', result.summary]);
     res.json(result);
@@ -1615,7 +1646,7 @@ app.get('/api/insights', authMiddleware, asyncHandler(async (req, res) => {
   // Offset interest insight
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = $1 ORDER BY updated_at DESC LIMIT 1", ['offset'])).rows[0];
   const offsetBal = offsetRow ? offsetRow.balance : 0;
-  const mortgageRate = 0.062;
+  const mortgageRate = await getMortgageRate(db);
   const monthlyInterestSaved = (offsetBal * mortgageRate) / 12;
   const annualInterestSaved = offsetBal * mortgageRate;
 
@@ -1854,6 +1885,7 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
     goals,
     users,
     mortgage_monthly: mortgage,
+    mortgage_rate: await getMortgageRate(db),
     estimated_monthly_income: Math.round(estimatedMonthlyIncome),
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
@@ -2160,7 +2192,8 @@ app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
   const totalSpent30d = (await db.query('SELECT SUM(amount) as t FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
   const coreSpent30d = (await db.query('SELECT SUM(amount) as t FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [thirtyDaysAgo, OUTLIER_CATEGORIES])).rows[0];
   const offsetBal = currentBalances.offset || 0;
-  const annualInterestSaved = offsetBal * 0.062;
+  const mortgageRateVal = await getMortgageRate(db);
+  const annualInterestSaved = offsetBal * mortgageRateVal;
   const totalMonthlyBudget = budgetRows.reduce((s, b) => s + b.monthly_amount * budgetScale, 0);
   const coreMonthlyBudget = budgetRows.filter(b => !OUTLIER_CATEGORIES.includes(b.category)).reduce((s, b) => s + b.monthly_amount * budgetScale, 0);
   const totalMonthlyNetIncome = memberProfiles.reduce((s, u) => s + u.estimated_monthly_net, 0);
@@ -2173,7 +2206,7 @@ app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
       app: 'Household Budget Tracker',
     },
     analysis_context: {
-      summary: 'Household budget data for Adam and Aruto in Sydney, Australia. All surplus income flows to an offset account linked to their mortgage to reduce interest. The offset balance earns effective interest at the mortgage rate (6.2%) rather than a savings account.',
+      summary: `Household budget data for Adam and Aruto in Sydney, Australia. All surplus income flows to an offset account linked to their mortgage to reduce interest. The offset balance earns effective interest at the mortgage rate (${(mortgageRateVal * 100).toFixed(2)}%) rather than a savings account.`,
       core_spending_note: `"Core" spending excludes [${OUTLIER_CATEGORIES.join(', ')}] — these are lumpy, infrequent or fixed obligations. Core spending reflects day-to-day discretionary habits.`,
       offset_strategy: 'Each payday, net pay minus retention (spending money kept) is transferred to the offset account. Mortgage is auto-debited from offset on the 23rd each month.',
       key_metrics: {
@@ -2185,7 +2218,7 @@ app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
         estimated_monthly_net_income: Math.round(totalMonthlyNetIncome),
         estimated_monthly_surplus: Math.round(totalMonthlyNetIncome - (parseFloat(totalSpent30d.t) || 0)),
         mortgage_monthly: mortgageMonthly,
-        mortgage_rate_pct: 6.2,
+        mortgage_rate_pct: mortgageRateVal * 100,
         offset_balance: offsetBal,
         offset_interest_saved_annually: Math.round(annualInterestSaved),
         offset_interest_saved_monthly: Math.round(annualInterestSaved / 12),
@@ -2204,7 +2237,7 @@ app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
     household: {
       members: memberProfiles,
       mortgage_monthly_total: mortgageMonthly,
-      mortgage_rate_pct: 6.2,
+      mortgage_rate_pct: mortgageRateVal * 100,
       budget_scale_pct: Math.round(budgetScale * 100),
       levers: levers.map(l => ({ name: l.name, value: l.value, description: l.description })),
     },
@@ -2223,81 +2256,214 @@ app.get('/api/export/ai', authMiddleware, asyncHandler(async (req, res) => {
   res.send(JSON.stringify(payload, null, 2));
 }));
 
+// ===================== MORTGAGE CONFIG =====================
+
+app.get('/api/mortgage-config', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const config = await getMortgageConfig(db);
+  res.json(config);
+}));
+
+app.put('/api/mortgage-config', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const { rate, monthly_payment, start_date, term_years } = req.body;
+  const userId = req.user.id;
+
+  const upsert = async (name, value, description, leverType) => {
+    const existing = (await db.query("SELECT id FROM levers WHERE name = $1 AND active = 1", [name])).rows[0];
+    if (existing) {
+      await db.query("UPDATE levers SET value = $1, set_by = $2, updated_at = NOW() WHERE id = $3", [value, userId, existing.id]);
+    } else {
+      await db.query("INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ($1, $2, $3, $4, $5)", [name, description, leverType, value, userId]);
+    }
+  };
+
+  if (rate !== undefined) await upsert('Mortgage Rate', rate, 'Annual mortgage interest rate (variable)', 'percentage');
+  if (monthly_payment !== undefined) await upsert('Mortgage Monthly', monthly_payment, 'Total monthly mortgage payment (auto-debited from offset on 23rd)', 'dollar');
+  if (start_date !== undefined) await upsert('Mortgage Start Date', start_date, 'Date of first mortgage payment', 'text');
+  if (term_years !== undefined) await upsert('Mortgage Term Years', term_years, 'Original mortgage term in years', 'number');
+
+  const config = await getMortgageConfig(db);
+  res.json(config);
+}));
+
 // ===================== PROJECTIONS =====================
 
 app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
   const users = (await db.query('SELECT * FROM users')).rows;
+  const mc = await getMortgageConfig(db);
 
-  // Support multiple spending pace ranges
   const paceDays = Math.min(Math.max(parseInt(req.query.pace_days) || 30, 7), 365);
-  const projectionMonths = Math.min(Math.max(parseInt(req.query.months) || 12, 3), 60);
+  const projectionMonths = Math.min(Math.max(parseInt(req.query.months) || 24, 3), 360);
   const paceStart = clampDate(new Date(Date.now() - paceDays * 86400000).toISOString().split('T')[0]);
   const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
+
   const paceExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [paceStart])).rows[0];
   const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
 
-  // Calculate actual days elapsed for accurate pace
   const actualDaysElapsed = Math.max(1, Math.floor((Date.now() - new Date(paceStart + 'T00:00:00').getTime()) / 86400000));
   const dailySpendRate = (parseFloat(paceExpenses.total) || 0) / actualDaysElapsed;
   const monthlyExpenseAtPace = dailySpendRate * 30.44;
 
-  // Calculate combined net income (rough estimate)
   let totalAnnualNet = 0;
   for (const u of users) {
     const grossExSuper = u.gross_income / (1 + u.super_rate);
-    const taxable = grossExSuper;
     let tax = 0;
-    if (taxable > 190000) tax = 51667 + (taxable - 190000) * 0.45;
-    else if (taxable > 135000) tax = 29467 + (taxable - 135000) * 0.37;
-    else if (taxable > 45000) tax = 5092 + (taxable - 45000) * 0.325;
-    else if (taxable > 18200) tax = (taxable - 18200) * 0.19;
-    const hecsRepayment = taxable * u.hecs_repayment_rate;
-    const annualNet = taxable - tax - hecsRepayment;
-    totalAnnualNet += annualNet;
+    if (grossExSuper > 190000) tax = 51667 + (grossExSuper - 190000) * 0.45;
+    else if (grossExSuper > 135000) tax = 29467 + (grossExSuper - 135000) * 0.37;
+    else if (grossExSuper > 45000) tax = 5092 + (grossExSuper - 45000) * 0.325;
+    else if (grossExSuper > 18200) tax = (grossExSuper - 18200) * 0.19;
+    totalAnnualNet += grossExSuper - tax - (grossExSuper * u.hecs_repayment_rate);
   }
 
   const monthlyNetIncome = totalAnnualNet / 12;
-  const monthlyExpenseAvg = parseFloat(monthlyExpenses.total) || 0;
-  const mortgage = await getMortgageMonthly(db);
-  // Use pace-based expenses for projections
   const monthlySurplus = monthlyNetIncome - monthlyExpenseAtPace;
 
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-  const offsetBalance = offsetRow ? offsetRow.balance : 0;
+  const offsetBalance = offsetRow ? parseFloat(offsetRow.balance) : 0;
 
   const goals = (await db.query('SELECT * FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
   const levers = (await db.query('SELECT * FROM levers WHERE active = 1')).rows;
-
-  // Budget data
   const budgets = (await db.query('SELECT * FROM category_budgets')).rows;
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget;
 
-  // Project N months — all surplus goes to offset (minus mortgage auto-debit)
-  const projections = [];
-  let runningOffset = offsetBalance;
-  const paceBasedSurplus = Math.max(0, monthlySurplus);
-  const netOffsetGrowth = paceBasedSurplus - mortgage;
+  // ── Mortgage amortization calculations ──
+  const now = new Date();
+  const mortgageStart = new Date(mc.startDate + 'T00:00:00');
+  const monthsElapsed = (now.getFullYear() - mortgageStart.getFullYear()) * 12 + (now.getMonth() - mortgageStart.getMonth());
+  const originalPayoffDate = new Date(mortgageStart);
+  originalPayoffDate.setMonth(originalPayoffDate.getMonth() + mc.termMonths);
 
-  for (let m = 1; m <= projectionMonths; m++) {
-    const date = new Date();
-    date.setMonth(date.getMonth() + m);
-    runningOffset += netOffsetGrowth;
-    const mortgageRate = 0.062;
-    const monthlyInterestSaved = (runningOffset * mortgageRate) / 12;
-    projections.push({
-      month: date.toISOString().substring(0, 7),
-      offset: Math.round(runningOffset),
-      surplus_added: Math.round(paceBasedSurplus),
-      mortgage_debited: Math.round(mortgage),
-      net_growth: Math.round(netOffsetGrowth),
-      interest_saved: Math.round(monthlyInterestSaved),
-    });
+  // Standard amortization (no offset) — compute remaining balance and total interest
+  let balanceNoOffset = mc.principal;
+  let totalInterestNoOffset = 0;
+  for (let m = 0; m < mc.termMonths && balanceNoOffset > 0; m++) {
+    const interest = balanceNoOffset * mc.monthlyRate;
+    totalInterestNoOffset += interest;
+    const principalPaid = Math.min(mc.monthlyPayment - interest, balanceNoOffset);
+    balanceNoOffset -= principalPaid;
+  }
+  const totalCostNoOffset = mc.principal + totalInterestNoOffset;
+
+  // Amortization WITH offset — project forward from current state
+  // First reconstruct current mortgage balance (standard amortization for months elapsed)
+  let currentMortgageBalance = mc.principal;
+  let interestPaidSoFar = 0;
+  for (let m = 0; m < monthsElapsed && currentMortgageBalance > 0; m++) {
+    const interest = currentMortgageBalance * mc.monthlyRate;
+    interestPaidSoFar += interest;
+    const principalPaid = Math.min(mc.monthlyPayment - interest, currentMortgageBalance);
+    currentMortgageBalance -= principalPaid;
   }
 
-  // Milestone summaries
+  // Now project forward WITH offset growing
+  const netOffsetGrowth = Math.max(0, monthlySurplus) - mc.monthlyPayment;
+  let projBalance = currentMortgageBalance;
+  let projOffset = offsetBalance;
+  let totalInterestWithOffset = interestPaidSoFar;
+  let payoffMonth = null;
+  const projections = [];
+  const amortWithOffset = [];
+  const amortWithoutOffset = [];
+  let balNoOff = currentMortgageBalance;
+
+  for (let m = 1; m <= Math.max(projectionMonths, mc.termMonths - monthsElapsed); m++) {
+    const date = new Date();
+    date.setMonth(date.getMonth() + m);
+    const monthLabel = date.toISOString().substring(0, 7);
+
+    // Without offset path
+    if (balNoOff > 0) {
+      const intNoOff = balNoOff * mc.monthlyRate;
+      const princNoOff = Math.min(mc.monthlyPayment - intNoOff, balNoOff);
+      balNoOff = Math.max(0, balNoOff - princNoOff);
+    }
+
+    // With offset path
+    if (projBalance > 0) {
+      const effectiveBalance = Math.max(0, projBalance - projOffset);
+      const interest = effectiveBalance * mc.monthlyRate;
+      totalInterestWithOffset += interest;
+      const principalPaid = Math.min(mc.monthlyPayment - interest, projBalance);
+      projBalance = Math.max(0, projBalance - principalPaid);
+      projOffset += Math.max(0, monthlySurplus);
+      if (projBalance <= 0 && !payoffMonth) payoffMonth = m;
+    }
+
+    if (m <= projectionMonths) {
+      projections.push({
+        month: monthLabel,
+        offset: Math.round(projOffset),
+        mortgage_remaining: Math.round(projBalance),
+        mortgage_no_offset: Math.round(balNoOff),
+        interest_saved_monthly: Math.round(Math.max(0, projBalance * mc.monthlyRate - Math.max(0, projBalance - projOffset) * mc.monthlyRate)),
+        net_growth: Math.round(netOffsetGrowth),
+      });
+    }
+
+    if (m <= 360) {
+      amortWithOffset.push({ month: monthLabel, balance: Math.round(projBalance), offset: Math.round(projOffset) });
+      amortWithoutOffset.push({ month: monthLabel, balance: Math.round(balNoOff) });
+    }
+  }
+
+  const totalInterestSaved = totalInterestNoOffset - totalInterestWithOffset;
+  const projectedPayoffDate = payoffMonth
+    ? new Date(new Date().setMonth(new Date().getMonth() + payoffMonth))
+    : originalPayoffDate;
+  const timeSavedMonths = payoffMonth
+    ? Math.max(0, (mc.termMonths - monthsElapsed) - payoffMonth)
+    : 0;
+  const timeSavedYears = Math.floor(timeSavedMonths / 12);
+  const timeSavedRemMonths = timeSavedMonths % 12;
+
+  // ── Savings rate from actual data ──
+  const threeMonthsAgo = clampDate(new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]);
+  const recentIncome = (await db.query('SELECT SUM(offset_transfer) as total FROM income_entries WHERE pay_date >= $1', [threeMonthsAgo])).rows[0];
+  const recentMortgageDebits = (await db.query("SELECT COUNT(*) as cnt FROM fund_allocations WHERE allocation_type = 'mortgage_debit' AND allocated_date >= $1", [threeMonthsAgo])).rows[0];
+  const mortgageDebitsInPeriod = parseInt(recentMortgageDebits.cnt) || 0;
+  const totalAddedToOffset = parseFloat(recentIncome.total) || 0;
+  const totalDebitedFromOffset = mortgageDebitsInPeriod * mc.monthlyPayment;
+  const netSavingsRate3mo = (totalAddedToOffset - totalDebitedFromOffset) / 3;
+
+  // ── Spending scenarios ──
+  const scenarios = [
+    { label: 'Cut spending 10%', monthly_saving: Math.round(monthlyExpenseAtPace * 0.10) },
+    { label: 'Cut spending 20%', monthly_saving: Math.round(monthlyExpenseAtPace * 0.20) },
+    { label: 'Save extra $500/mo', monthly_saving: 500 },
+    { label: 'Save extra $1,000/mo', monthly_saving: 1000 },
+    { label: 'Save extra $2,000/mo', monthly_saving: 2000 },
+  ].map(s => {
+    let bal = currentMortgageBalance;
+    let off = offsetBalance;
+    let totalInt = interestPaidSoFar;
+    let pm = null;
+    const adjustedSurplus = monthlySurplus + s.monthly_saving;
+    for (let m = 1; m <= mc.termMonths && bal > 0; m++) {
+      const eff = Math.max(0, bal - off);
+      const interest = eff * mc.monthlyRate;
+      totalInt += interest;
+      const princPaid = Math.min(mc.monthlyPayment - interest, bal);
+      bal = Math.max(0, bal - princPaid);
+      off += Math.max(0, adjustedSurplus);
+      if (bal <= 0 && !pm) pm = m;
+    }
+    const intSaved = totalInterestNoOffset - totalInt;
+    const tSaved = pm ? Math.max(0, (mc.termMonths - monthsElapsed) - pm) : 0;
+    return {
+      ...s,
+      payoff_months: pm || (mc.termMonths - monthsElapsed),
+      time_saved_months: tSaved,
+      time_saved_years: Math.floor(tSaved / 12),
+      time_saved_rem_months: tSaved % 12,
+      interest_saved: Math.round(intSaved),
+    };
+  });
+
+  // Milestones
   const milestones = {};
   [12, 24, 36, 60].forEach(m => {
     if (m <= projectionMonths && projections[m - 1]) {
@@ -2308,7 +2474,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   // Goal achievement forecast
   const goalForecasts = goals.map(g => {
     const remaining = g.target_amount - g.current_amount;
-    const monthlyContrib = Math.max(0, budgetedSurplus) * 0.1; // rough estimate: 10% of surplus per goal
+    const monthlyContrib = Math.max(0, budgetedSurplus) * 0.1;
     const monthsToGoal = monthlyContrib > 0 ? Math.ceil(remaining / monthlyContrib) : null;
     return { ...g, months_to_goal: monthsToGoal };
   });
@@ -2329,28 +2495,53 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   };
 
   const status = monthlySurplus > 500 ? 'great' : monthlySurplus > 0 ? 'okay' : 'warning';
+  const rateDisplay = (mc.rate * 100).toFixed(2);
   const message = monthlySurplus > 500
-    ? `You're adding ~$${Math.round(monthlySurplus)}/month to offset. Every dollar saves ${(0.062 * 100).toFixed(1)}% in mortgage interest!`
+    ? `You're adding ~$${Math.round(monthlySurplus)}/month to offset. Every dollar saves ${rateDisplay}% in mortgage interest!`
     : monthlySurplus > 0
     ? `Positive surplus of ~$${Math.round(monthlySurplus)}/month going to offset. Look for ways to grow it.`
     : `Warning: spending exceeds income by ~$${Math.round(Math.abs(monthlySurplus))}/month. Offset balance will shrink.`;
 
   res.json({
     monthly_net_income: Math.round(monthlyNetIncome),
-    monthly_expenses: Math.round(monthlyExpenseAvg),
+    monthly_expenses: Math.round(parseFloat(monthlyExpenses.total) || 0),
     monthly_expenses_at_pace: Math.round(monthlyExpenseAtPace),
     pace_days: paceDays,
     daily_spend_rate: Math.round(dailySpendRate),
-    mortgage,
+    mortgage: mc.monthlyPayment,
+    mortgage_config: {
+      rate_percent: mc.ratePercent,
+      monthly_payment: mc.monthlyPayment,
+      start_date: mc.startDate,
+      term_years: mc.termYears,
+      original_principal: Math.round(mc.principal),
+      current_balance: Math.round(currentMortgageBalance),
+      months_elapsed: monthsElapsed,
+      original_payoff_date: originalPayoffDate.toISOString().split('T')[0],
+      projected_payoff_date: projectedPayoffDate.toISOString().split('T')[0],
+      time_saved_years: timeSavedYears,
+      time_saved_months: timeSavedRemMonths,
+      total_time_saved_months: timeSavedMonths,
+      total_interest_no_offset: Math.round(totalInterestNoOffset),
+      total_interest_with_offset: Math.round(totalInterestWithOffset),
+      total_interest_saved: Math.round(totalInterestSaved),
+      interest_saved_monthly_now: Math.round(Math.max(0, currentMortgageBalance - Math.max(0, currentMortgageBalance - offsetBalance)) * mc.monthlyRate),
+    },
     monthly_surplus: Math.round(monthlySurplus),
     budgeted_expenses: Math.round(totalMonthlyBudget),
     budgeted_surplus: Math.round(budgetedSurplus),
-    net_offset_growth: Math.round(netOffsetGrowth),
+    net_offset_growth: Math.round(Math.max(0, monthlySurplus) - mc.monthlyPayment),
+    savings_rate: {
+      monthly_net: Math.round(netSavingsRate3mo),
+      total_added_3mo: Math.round(totalAddedToOffset),
+      total_debited_3mo: Math.round(totalDebitedFromOffset),
+    },
     projections,
     projection_months: projectionMonths,
     milestones,
     offset_balance: offsetBalance,
     goals: goalForecasts,
+    scenarios,
     benchmarks: sydneyBenchmarks,
     status,
     message

@@ -352,6 +352,45 @@ async function initSchema() {
     }
   }
 
+  // Seed Mortgage Rate lever
+  const mortgageRateLever = (await pool.query("SELECT id FROM levers WHERE name = 'Mortgage Rate' AND active = 1")).rows[0];
+  if (!mortgageRateLever) {
+    const adminUser2 = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+    if (adminUser2) {
+      await pool.query(
+        "INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ('Mortgage Rate', 'Annual mortgage interest rate (variable)', 'percentage', $1, $2)",
+        [6.24, adminUser2.id]
+      );
+      console.log('Mortgage Rate lever seeded: 6.24%');
+    }
+  }
+
+  // Seed Mortgage Start Date lever
+  const mortgageStartLever = (await pool.query("SELECT id FROM levers WHERE name = 'Mortgage Start Date' AND active = 1")).rows[0];
+  if (!mortgageStartLever) {
+    const adminUser3 = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+    if (adminUser3) {
+      await pool.query(
+        "INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ('Mortgage Start Date', 'Date of first mortgage payment', 'text', $1, $2)",
+        ['2025-11-23', adminUser3.id]
+      );
+      console.log('Mortgage Start Date lever seeded: 2025-11-23');
+    }
+  }
+
+  // Seed Mortgage Term Years lever
+  const mortgageTermLever = (await pool.query("SELECT id FROM levers WHERE name = 'Mortgage Term Years' AND active = 1")).rows[0];
+  if (!mortgageTermLever) {
+    const adminUser4 = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
+    if (adminUser4) {
+      await pool.query(
+        "INSERT INTO levers (name, description, lever_type, value, set_by) VALUES ('Mortgage Term Years', 'Original mortgage term in years', 'number', $1, $2)",
+        [30, adminUser4.id]
+      );
+      console.log('Mortgage Term Years lever seeded: 30');
+    }
+  }
+
   // Ensure retention profiles exist for all users
   const allUsers = (await pool.query('SELECT id, username FROM users')).rows;
   for (const u of allUsers) {
