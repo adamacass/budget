@@ -1,12 +1,26 @@
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 
-// Use DATABASE_URL for PostgreSQL connection (Render sets this automatically)
+// Use DATABASE_URL for PostgreSQL connection (Render sets this automatically).
+// Self-hosted/Docker Postgres has no TLS, so SSL is disabled for local hosts or
+// when explicitly turned off via PGSSLMODE=disable / DATABASE_SSL=false.
+function shouldUseSsl(url) {
+  if (!url) return false;
+  const sslMode = (process.env.PGSSLMODE || '').toLowerCase();
+  if (sslMode === 'disable') return false;
+  if ((process.env.DATABASE_SSL || '').toLowerCase() === 'false') return false;
+  if (/[?&]sslmode=disable/i.test(url)) return false;
+  // Treat container/LAN hosts as local — no TLS available on a plain Postgres image
+  let host = '';
+  try { host = new URL(url).hostname; } catch { host = ''; }
+  const localHosts = ['localhost', '127.0.0.1', '::1', 'db', 'postgres', 'budget-db', 'host.docker.internal'];
+  if (localHosts.includes(host)) return false;
+  return true;
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('localhost')
-    ? { rejectUnauthorized: false }
-    : false,
+  ssl: shouldUseSsl(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : false,
 });
 
 let initialized = false;
@@ -180,7 +194,40 @@ async function initSchema() {
       notes TEXT,
       contributed_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- Money taken OUT of the offset (or put back in). Negative amount = deposit.
+    CREATE TABLE IF NOT EXISTS offset_withdrawals (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      amount REAL NOT NULL,
+      withdrawal_date TEXT NOT NULL,
+      reason TEXT,
+      category TEXT NOT NULL DEFAULT 'Other',
+      goal_id INTEGER REFERENCES savings_goals(id),
+      recurring INTEGER NOT NULL DEFAULT 0,
+      recurring_months INTEGER,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Planned future withdrawals, used by projections (not yet actually taken out)
+    CREATE TABLE IF NOT EXISTS planned_withdrawals (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      label TEXT NOT NULL,
+      amount REAL NOT NULL,
+      target_date TEXT,
+      recurring INTEGER NOT NULL DEFAULT 0,
+      frequency_months INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
+
+  // Offset ledger metadata: explain why a balance snapshot changed
+  try {
+    await pool.query("ALTER TABLE account_balances ADD COLUMN IF NOT EXISTS note TEXT");
+    await pool.query("ALTER TABLE account_balances ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual'");
+  } catch (e) { /* columns may already exist */ }
 
   // Add offset-centric columns if missing
   try {
@@ -203,19 +250,10 @@ async function initSchema() {
     await pool.query("UPDATE users SET gross_income = 95000 WHERE username = 'aruto' AND gross_income = 70000");
   } catch (e) { /* ignore */ }
 
-  // Update offset balance to latest known value if it was mangled by auto-mortgage
-  try {
-    const offsetRow = (await pool.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
-    const currentBal = offsetRow ? offsetRow.balance : 0;
-    // If balance dropped below $58k due to erroneous auto-debit, restore it
-    if (currentBal < 58000 && currentBal > 0) {
-      const admin = (await pool.query("SELECT id FROM users WHERE username = 'adam'")).rows[0];
-      if (admin) {
-        await pool.query("INSERT INTO account_balances (account_type, balance, updated_by) VALUES ('offset', 58236.51, $1)", [admin.id]);
-        console.log(`Restored offset balance from $${currentBal} to $58,236.51`);
-      }
-    }
-  } catch (e) { /* ignore */ }
+  // NOTE: a one-off repair used to live here that reset the offset to $58,236.51
+  // on every startup whenever the balance was under $58k. It has been removed:
+  // now that balances can be corrected and withdrawals recorded deliberately, that
+  // hack would silently undo any withdrawal that took the offset below the threshold.
 
   // Seed historical income entries (Aruto $450/wk to offset, Adam fortnightly)
   try {
@@ -422,30 +460,111 @@ async function seedCategoryBudgets() {
   console.log('Category budgets seeded (conservative / high-savings): $' + conservativeBudgets.reduce((s, b) => s + b[1], 0) + '/mo');
 }
 
-function autoCategorizeTxn(desc, learnedRules) {
-  const d = desc.toLowerCase();
-  // Check learned category rules first (user-taught mappings)
+// Strip the noise banks wrap around merchant names so matching is reliable:
+// card numbers, reference ids, value dates, trailing locations and country codes.
+function normalizeDescription(desc) {
+  let d = String(desc || '').toLowerCase();
+  d = d.replace(/\b(?:visa|eftpos|mastercard|debit|credit)\s+(?:purchase|payment)\b/g, ' ');
+  d = d.replace(/\bcard\s*(?:no\.?|number|x+)?\s*[x*\d]{4,}\b/g, ' ');
+  d = d.replace(/\bvalue\s+date:?\s*\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}/g, ' ');
+  d = d.replace(/\b(?:receipt|ref|reference|txn|auth)\b\s*(?:no\.?|#)?\s*[\w-]{4,}\b/g, ' ');
+  d = d.replace(/\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/g, ' ');
+  d = d.replace(/[^a-z0-9&.\s'-]/g, ' ');
+  // Statement lines often glue a country/state suffix onto the merchant
+  // ("ticketmasterau", "spotifycom") — split it off so brand matching still works.
+  d = d.replace(/\b([a-z]{5,}?)(au|aus|com|comau|nsw)\b/g, '$1 $2');
+  d = d.replace(/\b(?:aus|au|australia|nsw|vic|qld|wa|sa|tas|act|nt)\b/g, ' ');
+  d = d.replace(/\b\d{6,}\b/g, ' ');
+  return d.replace(/\s+/g, ' ').trim();
+}
+
+// Ordered rules — first match wins, so put specific patterns above general ones.
+// `strong: true` means a confident merchant match (used to decide what needs review).
+const CATEGORY_RULES = [
+  // Transfers / internal movements first so they never look like spending
+  { cat: 'Transfer', strong: true, re: /\b(?:transfer|tfr|xfer)\b|\binternal\s+transfer\b|\bown\s+account\b|\bnetbank\s+transfer\b|\bosko\b|\bpayid\b/ },
+
+  { cat: 'Mortgage', strong: true, re: /\bmortgage\b|\bhome\s+loan\b|\bloan\s+(?:repay|payment|instal)|bpay.*\bdeft\b|\boffset\b/ },
+
+  // Insurance sits high: an insurance premium is Insurance whoever the insurer is
+  // (NRMA/Suncorp also appear in Transport/Utilities patterns below).
+  // Note: no bare \bpremium\b here — it matches "Spotify Premium", "premium fuel" etc.
+  { cat: 'Insurance', strong: true, re: /\binsurance\b|\binsurance\s+premium\b|\ballianz\b|\bqbe\b|\baami\b|\byoui\b|\bbudget\s+direct\b|\bnib\b|\bmedibank\b|\bbupa\b|\bhcf\b|\bahm\b|\bteachers\s+health\b|\bhbf\b/ },
+
+  // Food delivery before generic "uber" so Uber Eats isn't Transport
+  { cat: 'Dining Out', strong: true, re: /\bubereats\b|\buber\s?eats\b|\bdoordash\b|\bmenulog\b|\bdeliveroo\b|\bhungry\s?panda\b|\beasi\b/ },
+
+  { cat: 'Groceries', strong: true, re: /\bwoolworths\b|\bwoolies\b|\bcoles\b|\baldi\b|\biga\b|\bharris\s+farm\b|\bcostco\b|\bfoodworks\b|\bspudshed\b|\bnorton\s+st\s+grocer\b|\bthomas\s+dux\b|\bflour\s+and\s+stone\b/ },
+  { cat: 'Groceries', re: /\bgrocer|\bbutcher\b|\bgreengrocer\b|\bfruit\s*&?\s*veg\b|\bdeli\b|\bfishmonger\b|\bseafood\s+market\b|\bbakers\s+delight\b|\bbakery\b|\bpasture\b/ },
+
+  { cat: 'Dining Out', strong: true, re: /\bmcdonald|\bkfc\b|\bsubway\b|\bhungry\s+jack|\bdomino|\bguzman|\bnando|\bgrill'?d\b|\bboost\s+juice\b|\bgong\s?cha\b|\bchatime\b|\bstarbucks\b|\bkrispy\s+kreme\b|\bbetty'?s\s+burgers\b|\bzeus\s+street\b|\bsushi\s+hub\b/ },
+  { cat: 'Dining Out', re: /\bcafe\b|\bcaf[eé]\b|\bcoffee\b|\bespresso\b|\brestaurant\b|\bbistro\b|\bbrasserie\b|\beatery\b|\bkitchen\b|\bdiner\b|\btrattoria\b|\bosteria\b|\bcanteen\b|\bpizzeria\b|\bpizza\b|\bburger\b|\bsushi\b|\bramen\b|\bnoodle|\bthai\b|\bindian\b|\bchinese\b|\bvietnamese\b|\bbanh\s?mi\b|\bkorean\b|\bjapanese\b|\bgreek\b|\bsouvla|\btapas\b|\bpub\b|\btavern\b|\bhotel\s+bar\b|\bbrewery\b|\bwine\s+bar\b|\bcocktail\b|\bcellars?\b|\bliquorland\b|\bdan\s+murphy|\bbws\b|\bbottle\s?(?:shop|o)\b|\bsurf\s+club\b|\bbowling\s+club\b|\brsl\b|\bcrepe\b|\bgelato\b|\bice\s?cream\b|\bpatisserie\b|\bdessert\b|\brooster\b|\broast\b|\bgrill\b|\bbrunch\b|\blunch\b|\bdining\b|\browers\b|\bjanus\s+bar\b|\bartistry\s+garden\b/ },
+
+  { cat: 'Transport', strong: true, re: /\buber\b|\bdidi\b|\bola\b|\bola\s?cabs\b|\blyft\b|\bopal\b|\btransport\s?for\s?nsw\b|\blinkt\b|\be-?toll\b|\bgo\s?via\b|\bcabcharge\b|\bthirteen\s?cabs\b|\b13cabs\b|\btaxipay\b|\bnrma\b|\bracv\b|\bmyki\b/ },
+  { cat: 'Transport', re: /\btaxi\b|\btoll\b|\bparking\b|\bcar\s?park\b|\bwilson\s+park|\bsecure\s+park|\bfuel\b|\bpetrol\b|\bservice\s+station\b|\bbp\b|\bshell\b|\bcaltex\b|\bampol\b|\bmobil\b|\bunited\s+petroleum\b|\b7-?eleven\b|\brego\b|\bregistration\b|\brms\b|\bservice\s?nsw\b|\bcar\s?wash\b|\bmechanic\b|\btyre|\bairport\b|\bsyd\s+aprt\b|\bcarp50\b|\btrain\b|\bferry\b|\bbus\b/ },
+
+  { cat: 'Utilities', strong: true, re: /\bagl\b|\borigin\s+energy\b|\bendeavour\s+energy\b|\bausgrid\b|\bred\s+energy\b|\bsimply\s+energy\b|\bsydney\s+water\b|\btelstra\b|\boptus\b|\bvodafone\b|\btpg\b|\biinet\b|\baussie\s?broadband\b|\bbelong\b|\bamaysim\b|\bmore\s+telecom\b|\bsuperloop\b/ },
+  { cat: 'Utilities', re: /\benergy\b|\belectricity\b|\bwater\s+(?:bill|corp|rates)\b|\bgas\s+(?:bill|supply)\b|\binternet\b|\bbroadband\b|\bmobile\s+(?:plan|bill)\b|\bnbn\b|\bcouncil\s+rates\b|\bstrata\b|\bowners\s+corp/ },
+
+
+  { cat: 'Subscriptions', strong: true, re: /\bnetflix\b|\bspotify\b|\bdisney\b|\bstan\b|\bbinge\b|\bkayo\b|\bfoxtel\b|\bprime\s?video\b|\bamazon\s?prime\b|\bamznprime\b|\bapple\.?\s*com\b|\bitunes\b|\bapple\s+music\b|\byoutube\s?(?:premium|music)?\b|\bgoogle\s+one\b|\bicloud\b|\bdropbox\b|\bopenai\b|\bchatgpt\b|\bclaude\.?ai\b|\banthropic\b|\bpatreon\b|\bsubstack\b|\bnoahpinion\b|\breadtheclassics\b|\bkindle\b|\bsam\s+harris\b|\baudible\b|\bnytimes\b|\bfairfax\b|\bnews\s?corp\b|\bafr\b|\bcanva\b|\badobe\b|\bmicrosoft\s?365\b|\blinkedin\s+premium\b|\bstrava\b|\bduolingo\b/ },
+  { cat: 'Subscriptions', re: /\bsubscription\b|\bmembership\s+(?:fee|renewal)\b|\bmonthly\s+plan\b|\bannual\s+plan\b/ },
+
+  { cat: 'Entertainment', strong: true, re: /\bticketmaster\b|\bticketek\b|\beventbrite\b|\bmoshtix\b|\bhoyts\b|\bevent\s+cinemas\b|\bdendy\b|\bpalace\s+cinema|\bimax\b|\bsteam\s?games\b|\bsteampowered\b|\bplaystation\b|\bxbox\b|\bnintendo\b|\bluna\s+park\b|\btaronga\b|\bopera\s+house\b/ },
+  { cat: 'Entertainment', re: /\bcinema\b|\bmovies?\b|\bconcert\b|\bfestival\b|\bmuseum\b|\bgallery\b|\bzoo\b|\btheme\s+park\b|\bbowling\b|\bgolf\b|\btennis\b|\bmini\s?golf\b|\barcade\b|\bescape\s+room\b|\bticket\b|\bunited\s+cup\b|\bsunrun\b/ },
+
+  { cat: 'Health', strong: true, re: /\bchemist\s?warehouse\b|\bpriceline\s+pharmacy\b|\bterry\s+white\b|\bamcal\b|\bfitness\s?first\b|\banytime\s+fitness\b|\bf45\b|\bgoodlife\b|\bplus\s?fitness\b|\bmedicare\b|\bdental\b|\bdentist\b|\bphysio|\bchiro|\boptometr|\bspecsavers\b|\boptical\b/ },
+  { cat: 'Health', re: /\bpharmacy\b|\bchemist\b|\bdoctor\b|\bmedical\s+(?:centre|center|practice)\b|\bgp\s+(?:clinic|visit)\b|\bclinic\b|\bhospital\b|\bpathology\b|\bradiology\b|\bpsycholog|\bgym\b|\byoga\b|\bpilates\b|\bmassage\b|\bosteo/ },
+
+  { cat: 'Clothing', strong: true, re: /\bkmart\b|\bbig\s?w\b|\btarget\b|\buniqlo\b|\bzara\b|\bh\s?&\s?m\b|\bcotton\s+on\b|\bcountry\s+road\b|\bmyer\b|\bdavid\s+jones\b|\bthe\s+iconic\b|\bassembly\s+label\b|\bpolitix\b|\bsaba\b|\bsportsgirl\b|\bseed\s+heritage\b|\bnike\b|\badidas\b|\bathlete'?s\s+foot\b|\brebel\s+sport\b|\buniversal\s+store\b|\binstitchu\b|\bmens\s+biz\b|\bpeter\s+alexander\b|\blorna\s+jane\b/ },
+  { cat: 'Clothing', re: /\bclothing\b|\bfashion\b|\bapparel\b|\bshoes?\b|\bboutique\b|\bmenswear\b|\bwomenswear\b|\bdry\s?clean/ },
+
+  { cat: 'Personal Care', strong: true, re: /\bmecca\b|\bsephora\b|\bpriceline\b|\bfade\s+out\b/ },
+  { cat: 'Personal Care', re: /\bhair(?:dress|cut|salon)?\b|\bbarber\b|\bbeauty\b|\bnail\s?(?:salon|bar)?\b|\bskin\s?(?:care|clinic)\b|\bspa\b|\bcosmetic|\bmakeup\b|\bwax(?:ing)?\b|\bbrow\s?bar\b|\bshav/ },
+
+  { cat: 'Gifts', strong: true, re: /\bgofundme\b|\bsalvation\s+army\b|\bred\s+cross\b|\bunicef\b|\boxfam\b|\bmsf\b|\bvinnies\b/ },
+  { cat: 'Gifts', re: /\bgift\b|\bflorist\b|\bflowers?\b|\bhamper\b|\bdonation\b|\bcharity\b/ },
+
+  { cat: 'Education', strong: true, re: /\budemy\b|\bcoursera\b|\bmasterclass\b|\bdymocks\b|\bbooktopia\b|\bkinokuniya\b|\babbey'?s\b/ },
+  { cat: 'Education', re: /\bcourse\b|\btuition\b|\btutor\b|\buniversity\b|\btafe\b|\bschool\s+fees\b|\btextbook\b|\bbookshop\b|\bbookstore\b/ },
+
+  { cat: 'Home', strong: true, re: /\bbunnings\b|\bikea\b|\bofficeworks\b|\bharvey\s+norman\b|\bthe\s+good\s+guys\b|\bjb\s?hi-?fi\b|\bfreedom\b|\bfantastic\s+furniture\b|\bnick\s?scali\b|\btemple\s*&?\s*webster\b|\bmocka\b|\bruggable\b|\bbed\s+bath\b|\bkogan\b|\bsupercheap\s+auto\b|\bamart\b|\bsnooze\b|\bkoala\b|\bbeacon\s+lighting\b|\bmitre\s?10\b|\bbarbeques\s+galore\b/ },
+  { cat: 'Home', re: /\bfurniture\b|\bhomeware\b|\bhardware\b|\bgarden(?:ing|\s+centre)?\b|\bnursery\b|\bplumb(?:er|ing)\b|\belectrician\b|\bhandyman\b|\bcleaner\b|\bremovalist\b|\bstorage\b|\bpest\s+control\b|\bchuck\s+trailer\b/ },
+
+  { cat: 'Other', strong: true, re: /\binternational\s+transaction\s+fee\b|\boverseas\s+(?:fee|transaction)\b|\batm\s+(?:fee|withdrawal)\b|\baccount\s+(?:fee|keeping)\b|\binterest\s+charged\b|\bannual\s+fee\b|\blate\s+fee\b/ },
+];
+
+// Returns { category, confidence, matched } — confidence: 'high' | 'medium' | 'low'
+function categorizeTxnDetailed(desc, learnedRules) {
+  const raw = String(desc || '').toLowerCase();
+  const d = normalizeDescription(desc);
+  if (!d) return { category: 'Other', confidence: 'low', matched: null };
+
+  // User-taught mappings always win, and count as high confidence
   if (learnedRules && learnedRules.length > 0) {
     for (const rule of learnedRules) {
-      if (d.includes(rule.supplier_pattern.toLowerCase())) return rule.category;
+      const pat = String(rule.supplier_pattern || '').toLowerCase().trim();
+      if (pat && (d.includes(pat) || raw.includes(pat))) {
+        return { category: rule.category, confidence: 'high', matched: `rule:${pat}` };
+      }
     }
   }
-  if (/woolworths|coles|aldi|iga|harris farm|market|grocer|fruit|butcher|bakers delight|pasture/.test(d)) return 'Groceries';
-  if (/uber\s?eats|doordash|menulog|deliveroo|mcdonald|kfc|subway|pizza|burger|cafe|coffee|restaurant|bar\s|pub\s|tavern|dining|eat|brunch|lunch|sushi|thai|greek|chinese|banh mi|crepe|roast|grill|souvla|rooster|boost juice|rowers|cellars|liquorland|surf club|canteen|noodles|janus bar|artistry garden/.test(d)) return 'Dining Out';
-  if (/uber|lyft|taxi|cabcharge|opal|linkt|toll|parking|fuel|petrol|bp\s|shell|caltex|ampol|7-?eleven|rego|rms|nrma|car\s?wash|transportfornsw|taxipay|syd aprt|carp50/.test(d)) return 'Transport';
-  if (/energy|water|gas|telstra|optus|vodafone|tpg|iinet|internet|broadband|electricity|ausgrid|origin|agl|sydney water|bpay.*water/.test(d)) return 'Utilities';
-  if (/insurance|allianz|qbe|suncorp|nib|medibank|bupa|hcf|ahm/.test(d)) return 'Insurance';
-  if (/netflix|spotify|disney|stan|binge|kayo|apple\.com|youtube|amazon prime|amznprime|subscribe|membership|patreon|noahpinion|readtheclassics|kindle|fairfax|google one|openai|chatgpt|claude\.ai|anthropic|sam harris/.test(d)) return 'Subscriptions';
-  if (/cinema|movies|ticket|event|concert|sport|game|bowling|golf|tennis|museum|zoo|theme park|luna park|steam|steamgames|ticketmaster|ticketek|united cup|sunrun/.test(d)) return 'Entertainment';
-  if (/pharmacy|chemist|doctor|gp\s|medical|dental|dentist|physio|gym|fitness|pool|yoga|pilates|health|fitness first/.test(d)) return 'Health';
-  if (/kmart|target|uniqlo|zara|h&m|cotton on|country road|myer|david jones|clothes|fashion|shoe|universal store|rebel|institchu|mens biz/.test(d)) return 'Clothing';
-  if (/hair|barber|beauty|nail|skin|spa|cosmetic|makeup|shav|fade out/.test(d)) return 'Personal Care';
-  if (/gift|flower|present|hamper|salvation army|gofundme/.test(d)) return 'Gifts';
-  if (/course|book|udemy|education|tutor|uni|school|tafe|dymocks/.test(d)) return 'Education';
-  if (/bunnings|ikea|officeworks|furniture|homeware|hardware|garden|plumb|electr|temple.*webster|mocka|ruggable|bed bath|kogan|supercheap auto|chuck trailer/.test(d)) return 'Home';
-  if (/international transaction fee/.test(d)) return 'Other';
-  if (/bpay.*deft|bpay.*payment|mortgage/.test(d)) return 'Mortgage';
-  return 'Other';
+
+  for (const rule of CATEGORY_RULES) {
+    const m = d.match(rule.re);
+    if (m) {
+      return {
+        category: rule.cat,
+        confidence: rule.strong ? 'high' : 'medium',
+        matched: m[0].trim(),
+      };
+    }
+  }
+  return { category: 'Other', confidence: 'low', matched: null };
+}
+
+function autoCategorizeTxn(desc, learnedRules) {
+  return categorizeTxnDetailed(desc, learnedRules).category;
 }
 
 async function seedStatementData() {
@@ -886,11 +1005,11 @@ async function seedStatementData() {
 
 async function getCategoryRules() {
   try {
-    const { rows } = await pool.query('SELECT supplier_pattern, category FROM category_rules ORDER BY id');
+    const { rows } = await pool.query('SELECT id, supplier_pattern, category FROM category_rules ORDER BY id');
     return rows;
   } catch (err) {
     return [];
   }
 }
 
-module.exports = { getDb, autoCategorizeTxn, getCategoryRules };
+module.exports = { getDb, autoCategorizeTxn, categorizeTxnDetailed, normalizeDescription, getCategoryRules };

@@ -366,9 +366,15 @@ export default function Dashboard() {
         <div className="offset-hero-top">
           <div className="offset-hero-balance">
             <div className="offset-hero-label"><DollarSign size={16} /> Offset Account</div>
-            <div className="offset-hero-amount">{fmtMoney(offsetBalance)}</div>
+            <div className="offset-hero-amount clickable" onClick={() => navigate('/offset')} title="Manage offset, withdrawals and corrections">
+              {fmtMoney(offsetBalance)}
+            </div>
             <div className="offset-hero-sub">
               Saving ~{fmtMoney(Math.round(offsetBalance * (data.mortgage_rate || 0.0624) / 12))}/mo in mortgage interest
+              {' · '}
+              <span className="clickable" style={{ textDecoration: 'underline' }} onClick={() => navigate('/offset')}>
+                Correct balance or log a withdrawal
+              </span>
             </div>
           </div>
           <div className="offset-hero-stats">

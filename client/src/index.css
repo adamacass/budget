@@ -241,6 +241,24 @@ a:hover { color: var(--accent-hover); }
 
 .sidebar-link svg { width: 18px; height: 18px; flex-shrink: 0; }
 
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-group + .sidebar-group { margin-top: 0.85rem; }
+
+.sidebar-group-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  opacity: 0.65;
+  padding: 0 0.75rem 0.3rem;
+}
+
 .sidebar-footer {
   padding: 1rem 1.25rem;
   border-top: 1px solid var(--border);
@@ -2409,6 +2427,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   .sidebar-nav { flex-direction: row; padding: 0; }
   .sidebar-link { padding: 0.4rem 0.6rem; font-size: 0.75rem; white-space: nowrap; }
   .sidebar-link span { display: none; }
+  /* On mobile the sidebar becomes a horizontal icon strip — drop the grouping */
+  .sidebar-group { flex-direction: row; }
+  .sidebar-group + .sidebar-group { margin-top: 0; }
+  .sidebar-group-label { display: none; }
   .sidebar-footer { display: none; }
   .main-content { margin-left: 0; padding: 1rem; }
   .app-layout { flex-direction: column; }

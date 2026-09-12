@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const XLSX = require('xlsx');
-const { getDb, autoCategorizeTxn, getCategoryRules } = require('./db');
+const { getDb, autoCategorizeTxn, categorizeTxnDetailed, getCategoryRules } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
 const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = require('./claude');
 
@@ -16,7 +16,10 @@ const DATA_START_DATE = '2026-01-01';
 function clampDate(date) { return date < DATA_START_DATE ? DATA_START_DATE : date; }
 
 // Categories excluded from "core" spending view (large lumpy or non-discretionary items)
-const OUTLIER_CATEGORIES = ['Insurance', 'Mortgage', 'Home'];
+const OUTLIER_CATEGORIES = ['Insurance', 'Mortgage', 'Home', 'Transfer'];
+
+// Moving money between your own accounts isn't spending — never count it as such
+const NON_SPENDING_CATEGORIES = ['Transfer'];
 
 // Wrap async route handlers so unhandled rejections return 500 instead of crashing
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -302,6 +305,73 @@ app.delete('/api/category-rules/:id', authMiddleware, asyncHandler(async (req, r
   res.json({ message: 'Rule deleted' });
 }));
 
+// Re-run categorisation across existing expenses. Preview by default; pass
+// apply:true to write. Useful after teaching new rules or improving the engine.
+app.post('/api/expenses/recategorize', authMiddleware, asyncHandler(async (req, res) => {
+  const { apply, only_uncategorized, since } = req.body || {};
+  const db = await getDb();
+  const rules = await getCategoryRules();
+
+  const params = [];
+  let sql = 'SELECT id, description, category, amount, expense_date FROM expenses WHERE 1=1';
+  if (only_uncategorized !== false) { sql += " AND category = 'Other'"; }
+  if (since) { params.push(since); sql += ` AND expense_date >= $${params.length}`; }
+  sql += ' ORDER BY expense_date DESC';
+
+  const rows = (await db.query(sql, params)).rows;
+  const changes = [];
+  for (const r of rows) {
+    const { category, confidence, matched } = categorizeTxnDetailed(r.description || '', rules);
+    if (category !== r.category && confidence !== 'low') {
+      changes.push({
+        id: r.id,
+        description: r.description,
+        amount: parseFloat(r.amount),
+        expense_date: r.expense_date,
+        from: r.category,
+        to: category,
+        confidence,
+        matched,
+      });
+    }
+  }
+
+  if (apply && changes.length) {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      for (const c of changes) {
+        await client.query('UPDATE expenses SET category = $1 WHERE id = $2', [c.to, c.id]);
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  res.json({ scanned: rows.length, changes, applied: !!apply && changes.length > 0, change_count: changes.length });
+}));
+
+// Merchants that keep landing in "Other" — the highest-value rules to teach
+app.get('/api/categorization-gaps', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const rows = (await db.query(
+    `SELECT description, COUNT(*) as count, SUM(amount) as total, MAX(expense_date) as last_seen
+     FROM expenses WHERE category = 'Other' AND description IS NOT NULL AND description <> ''
+     GROUP BY description ORDER BY SUM(amount) DESC LIMIT 40`
+  )).rows;
+  res.json(rows.map(r => ({
+    description: r.description,
+    count: parseInt(r.count),
+    total: Math.round(parseFloat(r.total) * 100) / 100,
+    last_seen: r.last_seen,
+    suggested_pattern: String(r.description).toLowerCase().split(/\s+/).slice(0, 2).join(' '),
+  })));
+}));
+
 // Check for potential duplicates before importing
 app.post('/api/expenses/check-duplicates', authMiddleware, asyncHandler(async (req, res) => {
   const { transactions } = req.body;
@@ -478,10 +548,294 @@ app.get('/api/balances', authMiddleware, asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/balances/:account', authMiddleware, asyncHandler(async (req, res) => {
-  const { balance } = req.body;
+  const { balance, note, source } = req.body;
   const db = await getDb();
-  await db.query('INSERT INTO account_balances (account_type, balance, updated_by) VALUES ($1, $2, $3)', [req.params.account, balance, req.user.id]);
+  await db.query(
+    'INSERT INTO account_balances (account_type, balance, updated_by, note, source) VALUES ($1, $2, $3, $4, $5)',
+    [req.params.account, balance, req.user.id, note || null, source || 'manual']
+  );
   res.json({ account: req.params.account, balance });
+}));
+
+// ===================== OFFSET: RESET, WITHDRAWALS, LEDGER =====================
+
+async function getOffsetBalance(db) {
+  const row = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  return row ? parseFloat(row.balance) : 0;
+}
+
+// Current offset balance + how much of it is claimed by goal buckets
+app.get('/api/offset/summary', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const balance = await getOffsetBalance(db);
+  const goals = (await db.query('SELECT id, name, current_amount, target_amount, priority FROM savings_goals WHERE active = 1 ORDER BY priority')).rows;
+  const allocated = goals.reduce((s, g) => s + (parseFloat(g.current_amount) || 0), 0);
+  const last = (await db.query("SELECT balance, note, source, updated_at FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+  res.json({
+    balance,
+    allocated_to_goals: Math.round(allocated * 100) / 100,
+    unallocated: Math.round((balance - allocated) * 100) / 100,
+    over_allocated: allocated > balance,
+    last_update: last ? { note: last.note, source: last.source, updated_at: last.updated_at } : null,
+    goals: goals.map(g => ({ ...g, current_amount: parseFloat(g.current_amount) || 0 })),
+  });
+}));
+
+// Reset the offset to an exact figure (e.g. after reconciling with the bank).
+// Optionally rescale goal buckets so they never exceed the real balance.
+app.post('/api/offset/reset', authMiddleware, asyncHandler(async (req, res) => {
+  const { balance, note, rebalance_goals } = req.body;
+  const newBalance = parseFloat(String(balance ?? '').replace(/[$,]/g, ''));
+  if (isNaN(newBalance) || newBalance < 0) {
+    return res.status(400).json({ error: 'Provide a valid, non-negative balance' });
+  }
+
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const prev = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    const previousBalance = prev ? parseFloat(prev.balance) : 0;
+
+    await client.query(
+      "INSERT INTO account_balances (account_type, balance, updated_by, note, source) VALUES ('offset', $1, $2, $3, 'reset')",
+      [newBalance, req.user.id, note || 'Manual offset reset']
+    );
+
+    let rebalanced = null;
+    if (rebalance_goals) {
+      const goals = (await client.query('SELECT id, current_amount FROM savings_goals WHERE active = 1')).rows;
+      const allocated = goals.reduce((s, g) => s + (parseFloat(g.current_amount) || 0), 0);
+      if (allocated > newBalance && allocated > 0) {
+        // Scale every bucket down proportionally so buckets fit inside the real balance
+        const factor = newBalance / allocated;
+        for (const g of goals) {
+          const scaled = Math.round((parseFloat(g.current_amount) || 0) * factor * 100) / 100;
+          await client.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2', [scaled, g.id]);
+          await client.query(
+            'INSERT INTO goal_contributions (goal_id, user_id, amount, notes) VALUES ($1, $2, $3, $4)',
+            [g.id, req.user.id, scaled, 'Redistribution']
+          );
+        }
+        rebalanced = { factor: Math.round(factor * 10000) / 10000, previous_allocated: allocated };
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({
+      balance: newBalance,
+      previous_balance: previousBalance,
+      change: Math.round((newBalance - previousBalance) * 100) / 100,
+      rebalanced,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
+// Record money taken out of (or put back into) the offset
+app.post('/api/offset/withdraw', authMiddleware, asyncHandler(async (req, res) => {
+  const { amount, withdrawal_date, reason, category, goal_id, deposit } = req.body;
+  const parsed = parseFloat(String(amount ?? '').replace(/[$,]/g, ''));
+  if (!parsed || isNaN(parsed) || parsed <= 0) {
+    return res.status(400).json({ error: 'Provide a valid amount greater than zero' });
+  }
+  // A deposit is stored as a negative withdrawal so one table covers both directions
+  const signed = deposit ? -Math.abs(parsed) : Math.abs(parsed);
+  const date = withdrawal_date || new Date().toISOString().split('T')[0];
+
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const prev = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    const previousBalance = prev ? parseFloat(prev.balance) : 0;
+    const newBalance = Math.max(0, Math.round((previousBalance - signed) * 100) / 100);
+
+    const inserted = (await client.query(
+      'INSERT INTO offset_withdrawals (user_id, amount, withdrawal_date, reason, category, goal_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [req.user.id, signed, date, reason || null, category || 'Other', goal_id || null]
+    )).rows[0];
+
+    await client.query(
+      "INSERT INTO account_balances (account_type, balance, updated_by, note, source) VALUES ('offset', $1, $2, $3, $4)",
+      [newBalance, req.user.id, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal'), deposit ? 'deposit' : 'withdrawal']
+    );
+
+    // If it came out of a specific goal bucket, draw that bucket down too
+    if (goal_id) {
+      const goal = (await client.query('SELECT current_amount FROM savings_goals WHERE id = $1', [goal_id])).rows[0];
+      if (goal) {
+        const updated = Math.max(0, Math.round(((parseFloat(goal.current_amount) || 0) - signed) * 100) / 100);
+        await client.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2', [updated, goal_id]);
+        await client.query(
+          'INSERT INTO goal_contributions (goal_id, user_id, amount, notes) VALUES ($1, $2, $3, $4)',
+          [goal_id, req.user.id, -signed, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal')]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ withdrawal: inserted, balance: newBalance, previous_balance: previousBalance });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
+app.get('/api/offset/withdrawals', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const rows = (await db.query(
+    `SELECT w.*, u.display_name as user_name, g.name as goal_name
+     FROM offset_withdrawals w
+     JOIN users u ON w.user_id = u.id
+     LEFT JOIN savings_goals g ON w.goal_id = g.id
+     ORDER BY w.withdrawal_date DESC, w.id DESC LIMIT $1`, [limit]
+  )).rows.map(r => ({ ...r, amount: parseFloat(r.amount) }));
+  res.json(rows);
+}));
+
+// Undo a withdrawal: remove the record and add the money back
+app.delete('/api/offset/withdrawals/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const w = (await client.query('SELECT * FROM offset_withdrawals WHERE id = $1', [req.params.id])).rows[0];
+    if (!w) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Withdrawal not found' }); }
+
+    const prev = (await client.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
+    const previousBalance = prev ? parseFloat(prev.balance) : 0;
+    const restored = Math.max(0, Math.round((previousBalance + parseFloat(w.amount)) * 100) / 100);
+
+    await client.query('DELETE FROM offset_withdrawals WHERE id = $1', [req.params.id]);
+    await client.query(
+      "INSERT INTO account_balances (account_type, balance, updated_by, note, source) VALUES ('offset', $1, $2, $3, 'reversal')",
+      [restored, req.user.id, `Reversed: ${w.reason || 'withdrawal'}`]
+    );
+
+    if (w.goal_id) {
+      const goal = (await client.query('SELECT current_amount FROM savings_goals WHERE id = $1', [w.goal_id])).rows[0];
+      if (goal) {
+        const updated = Math.max(0, Math.round(((parseFloat(goal.current_amount) || 0) + parseFloat(w.amount)) * 100) / 100);
+        await client.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2', [updated, w.goal_id]);
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: 'Withdrawal reversed', balance: restored });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
+// Unified movement history: pay-ins, withdrawals, mortgage debits and manual resets
+app.get('/api/offset/ledger', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const days = Math.min(parseInt(req.query.days) || 180, 1000);
+  const since = clampDate(new Date(Date.now() - days * 86400000).toISOString().split('T')[0]);
+
+  const payIns = (await db.query(
+    `SELECT ie.pay_date as date, ie.offset_transfer as amount, u.display_name as who
+     FROM income_entries ie JOIN users u ON ie.user_id = u.id
+     WHERE ie.pay_date >= $1 AND COALESCE(ie.offset_transfer, 0) > 0`, [since]
+  )).rows.map(r => ({ date: r.date, type: 'pay', label: `Pay transfer — ${r.who}`, amount: parseFloat(r.amount), direction: 'in' }));
+
+  const withdrawals = (await db.query(
+    `SELECT w.withdrawal_date as date, w.amount, w.reason, w.category, u.display_name as who, g.name as goal_name
+     FROM offset_withdrawals w JOIN users u ON w.user_id = u.id
+     LEFT JOIN savings_goals g ON w.goal_id = g.id
+     WHERE w.withdrawal_date >= $1`, [since]
+  )).rows.map(r => ({
+    date: r.date,
+    type: parseFloat(r.amount) < 0 ? 'deposit' : 'withdrawal',
+    label: r.reason || (parseFloat(r.amount) < 0 ? 'Deposit' : 'Withdrawal') + (r.goal_name ? ` (${r.goal_name})` : ''),
+    category: r.category,
+    who: r.who,
+    amount: Math.abs(parseFloat(r.amount)),
+    direction: parseFloat(r.amount) < 0 ? 'in' : 'out',
+  }));
+
+  // Mortgage debits are stored as negative allocations — show them as a positive outflow
+  const mortgage = (await db.query(
+    `SELECT allocated_date as date, amount, notes FROM fund_allocations
+     WHERE allocated_date >= $1 AND notes LIKE 'Mortgage%'`, [since]
+  )).rows.map(r => ({
+    date: r.date,
+    type: 'mortgage',
+    label: r.notes || 'Mortgage payment',
+    amount: Math.abs(parseFloat(r.amount) || 0),
+    direction: 'out',
+  }));
+
+  const resets = (await db.query(
+    `SELECT updated_at::date as date, balance, note, source FROM account_balances
+     WHERE account_type = 'offset' AND source IN ('reset', 'reversal') AND updated_at::date >= $1::date`, [since]
+  )).rows.map(r => ({
+    date: r.date.toISOString().split('T')[0],
+    type: r.source,
+    label: r.note || 'Balance reset',
+    amount: parseFloat(r.balance),
+    direction: 'adjust',
+  }));
+
+  const movements = [...payIns, ...withdrawals, ...mortgage, ...resets]
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  const totalIn = movements.filter(m => m.direction === 'in').reduce((s, m) => s + m.amount, 0);
+  const totalOut = movements.filter(m => m.direction === 'out').reduce((s, m) => s + m.amount, 0);
+
+  res.json({
+    movements,
+    since,
+    totals: {
+      in: Math.round(totalIn),
+      out: Math.round(totalOut),
+      net: Math.round(totalIn - totalOut),
+      withdrawals: Math.round(withdrawals.filter(w => w.direction === 'out').reduce((s, w) => s + w.amount, 0)),
+    },
+  });
+}));
+
+// ===================== PLANNED (FUTURE) WITHDRAWALS — feed projections =====================
+
+app.get('/api/planned-withdrawals', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const rows = (await db.query(
+    `SELECT p.*, u.display_name as user_name FROM planned_withdrawals p
+     JOIN users u ON p.user_id = u.id WHERE p.active = 1
+     ORDER BY COALESCE(p.target_date, '9999-12-31'), p.id`
+  )).rows.map(r => ({ ...r, amount: parseFloat(r.amount) }));
+  res.json(rows);
+}));
+
+app.post('/api/planned-withdrawals', authMiddleware, asyncHandler(async (req, res) => {
+  const { label, amount, target_date, recurring, frequency_months } = req.body;
+  const parsed = parseFloat(String(amount ?? '').replace(/[$,]/g, ''));
+  if (!label || !parsed || isNaN(parsed) || parsed <= 0) {
+    return res.status(400).json({ error: 'Provide a label and an amount greater than zero' });
+  }
+  const db = await getDb();
+  const row = (await db.query(
+    'INSERT INTO planned_withdrawals (user_id, label, amount, target_date, recurring, frequency_months) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+    [req.user.id, label, parsed, target_date || null, recurring ? 1 : 0, parseInt(frequency_months) || 0]
+  )).rows[0];
+  res.json(row);
+}));
+
+app.delete('/api/planned-withdrawals/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  await db.query('UPDATE planned_withdrawals SET active = 0 WHERE id = $1', [req.params.id]);
+  res.json({ message: 'Planned withdrawal removed' });
 }));
 
 // ===================== SAVINGS GOALS =====================
@@ -1101,10 +1455,23 @@ async function applyPendingMortgageDebits(db) {
       if (!existingContrib) {
         const goals = (await db.query('SELECT id, current_amount FROM savings_goals WHERE active = 1')).rows;
         const totalInBuckets = goals.reduce((s, g) => s + (g.current_amount || 0), 0);
-        if (totalInBuckets > 0) {
+
+        // The mortgage comes out of the offset as a whole. Goal buckets are only
+        // earmarks within it, so spend the UNALLOCATED balance first and touch the
+        // buckets only for whatever the unallocated portion couldn't cover.
+        // (Without this, a few months of repayments silently zero every goal even
+        // while tens of thousands sit unallocated in the offset.)
+        const balRow = (await db.query(
+          "SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1"
+        )).rows[0];
+        const offsetBalance = balRow ? parseFloat(balRow.balance) : 0;
+        const unallocated = Math.max(0, offsetBalance - totalInBuckets);
+        const shortfall = Math.max(0, Math.round((mortgage - unallocated) * 100) / 100);
+
+        if (totalInBuckets > 0 && shortfall > 0) {
           for (const goal of goals) {
             const share = (goal.current_amount || 0) / totalInBuckets;
-            const deduction = Math.round(mortgage * share * 100) / 100;
+            const deduction = Math.round(shortfall * share * 100) / 100;
             if (deduction > 0) {
               await db.query(
                 "INSERT INTO goal_contributions (goal_id, user_id, amount, notes, contributed_at) VALUES ($1, $2, $3, $4, $5::timestamptz)",
@@ -1197,90 +1564,227 @@ app.post('/api/statements/parse', authMiddleware, asyncHandler(async (req, res) 
   // Load learned category rules for auto-categorization
   const learnedRules = await getCategoryRules();
 
-  const lines = csv_text.trim().split('\n');
-  if (lines.length < 2) {
-    return res.status(400).json({ error: 'CSV needs at least a header row and one data row' });
+  const rawLines = csv_text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim());
+  if (rawLines.length === 0) {
+    return res.status(400).json({ error: 'No data rows found' });
   }
 
-  // Parse header row
-  const headerLine = lines[0];
-  const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().trim());
+  const delimiter = sniffDelimiter(rawLines);
+  const rows = rawLines.map(l => parseDelimitedLine(l, delimiter));
 
-  // Try to detect column mappings
-  const dateCol = headers.findIndex(h => /date/.test(h));
-  const amountCol = headers.findIndex(h => /amount|debit|value/.test(h));
-  const descCol = headers.findIndex(h => /description|details|narrative|memo|merchant|transaction/.test(h));
-  const creditCol = headers.findIndex(h => /credit/.test(h));
-  const debitCol = headers.findIndex(h => /debit/.test(h));
+  // Does row 0 look like headers? (no parseable date and mostly non-numeric)
+  const firstRow = rows[0].map(c => c.trim());
+  const looksLikeHeader = !firstRow.some(c => parseStatementDate(c))
+    && firstRow.filter(c => c && !isNumericCell(c)).length >= 2;
 
-  if (dateCol === -1) {
-    return res.status(400).json({ error: 'Could not find a date column. Expected a header containing "date".' });
+  let headers = [];
+  let dataRows = rows;
+  if (looksLikeHeader) {
+    headers = firstRow.map(h => h.toLowerCase().trim());
+    dataRows = rows.slice(1);
   }
-  if (amountCol === -1 && debitCol === -1) {
-    return res.status(400).json({ error: 'Could not find an amount column. Expected a header containing "amount", "debit", or "value".' });
+
+  if (dataRows.length === 0) {
+    return res.status(400).json({ error: 'Found a header row but no transaction rows beneath it' });
+  }
+
+  // Resolve columns from headers where possible, otherwise infer from the data
+  const mapping = looksLikeHeader
+    ? mapColumnsFromHeaders(headers)
+    : inferColumnsFromData(dataRows);
+
+  if (mapping.dateCol === -1) {
+    return res.status(400).json({ error: 'Could not find a date column. Add a header containing "date", or check the date format.' });
+  }
+  if (mapping.amountCol === -1 && mapping.debitCol === -1 && mapping.creditCol === -1) {
+    return res.status(400).json({ error: 'Could not find an amount column. Expected a header containing "amount", "debit", "credit" or "value".' });
   }
 
   const transactions = [];
   const income_transactions = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+  let skippedRows = 0;
 
-    const cols = parseCSVLine(line);
-    const rawDate = cols[dateCol]?.trim();
-    const description = cols[descCol >= 0 ? descCol : 0]?.trim() || '';
-
-    // Parse amount — handle debit/credit columns or single amount
-    let amount = 0;
-    let isCredit = false;
-    if (debitCol >= 0 && creditCol >= 0) {
-      const debit = parseFloat((cols[debitCol] || '').replace(/[$,]/g, '')) || 0;
-      const credit = parseFloat((cols[creditCol] || '').replace(/[$,]/g, '')) || 0;
-      if (debit > 0) { amount = debit; }
-      else if (credit > 0) { amount = credit; isCredit = true; }
-    } else {
-      const raw = parseFloat((cols[amountCol] || '').replace(/[$,]/g, '')) || 0;
-      if (raw < 0) { amount = Math.abs(raw); isCredit = true; }
-      else { amount = raw; }
-    }
-
-    // Skip zero-amount rows
-    if (amount <= 0) continue;
-
-    // Parse date — try common formats
+  for (const cols of dataRows) {
+    const rawDate = (cols[mapping.dateCol] || '').trim();
     const parsedDate = parseStatementDate(rawDate);
-    if (!parsedDate) continue;
+    if (!parsedDate) { skippedRows++; continue; }
 
-    // Detect income/salary patterns
+    let description = (cols[mapping.descCol >= 0 ? mapping.descCol : 0] || '').trim();
+    // Some banks split the merchant across two columns — append the extra one
+    if (mapping.descCol2 >= 0 && cols[mapping.descCol2]) {
+      const extra = cols[mapping.descCol2].trim();
+      if (extra && extra !== description) description = `${description} ${extra}`.trim();
+    }
+    description = description.replace(/\s+/g, ' ');
+
+    // Work out signed amount: positive = money out, negative = money in
+    let signed = null;
+    if (mapping.debitCol >= 0 || mapping.creditCol >= 0) {
+      const debit = mapping.debitCol >= 0 ? parseAmountCell(cols[mapping.debitCol]) : null;
+      const credit = mapping.creditCol >= 0 ? parseAmountCell(cols[mapping.creditCol]) : null;
+      if (debit !== null && Math.abs(debit) > 0) signed = Math.abs(debit);
+      else if (credit !== null && Math.abs(credit) > 0) signed = -Math.abs(credit);
+    }
+    if (signed === null && mapping.amountCol >= 0) {
+      const val = parseAmountCell(cols[mapping.amountCol]);
+      // Most AU exports use negative for money out; flip so positive = spend
+      if (val !== null) signed = -val;
+    }
+    if (signed === null || signed === 0 || isNaN(signed)) { skippedRows++; continue; }
+
+    const amount = Math.round(Math.abs(signed) * 100) / 100;
+    const isCredit = signed < 0;
+
     const dl = description.toLowerCase();
-    const isIncome = isCredit || /salary|payroll|wages|pay\s|direct credit|employer|ato\s|tax refund|centrelink|superannuation|dividend|interest\s+(credit|earned)|refund/i.test(dl);
+    const looksLikeIncome = /\b(salary|payroll|wages|direct credit|employer|tax refund|centrelink|superannuation|dividend|refund|reimbursement|rebate|ato\b)/i.test(dl);
 
-    if (isIncome) {
+    if (isCredit || looksLikeIncome) {
       income_transactions.push({
         expense_date: parsedDate,
-        description: description,
-        amount: Math.round(amount * 100) / 100,
+        description,
+        amount,
         type: 'income',
-        source: 'statement'
+        source: 'statement',
+        reason: isCredit ? 'credit' : 'description',
       });
       continue;
     }
 
-    // Auto-categorize based on description (learned rules first, then built-in)
-    const category = autoCategorizeTxn(description, learnedRules);
-
+    const { category, confidence, matched } = categorizeTxnDetailed(description, learnedRules);
     transactions.push({
       expense_date: parsedDate,
-      description: description,
-      amount: Math.round(amount * 100) / 100,
-      category: category,
+      description,
+      amount,
+      category,
+      confidence,
+      matched,
+      is_transfer: category === 'Transfer',
+      needs_review: confidence === 'low' || category === 'Transfer',
       entry_type: 'actual',
-      source: 'credit_card_statement'
+      source: 'credit_card_statement',
     });
   }
 
-  res.json({ transactions, income_transactions, column_mapping: { dateCol, amountCol, descCol, creditCol, debitCol }, row_count: lines.length - 1 });
+  const lowConfidence = transactions.filter(t => t.confidence === 'low').length;
+  const transfers = transactions.filter(t => t.is_transfer).length;
+  const dates = transactions.map(t => t.expense_date).sort();
+
+  res.json({
+    transactions,
+    income_transactions,
+    column_mapping: mapping,
+    delimiter: delimiter === '\t' ? 'tab' : delimiter,
+    had_header: looksLikeHeader,
+    row_count: dataRows.length,
+    skipped_rows: skippedRows,
+    summary: {
+      parsed: transactions.length,
+      income: income_transactions.length,
+      low_confidence: lowConfidence,
+      transfers,
+      total: Math.round(transactions.reduce((s, t) => s + t.amount, 0) * 100) / 100,
+      date_from: dates[0] || null,
+      date_to: dates[dates.length - 1] || null,
+    },
+  });
 }));
+
+// Pick the delimiter that yields the most consistent column count
+function sniffDelimiter(lines) {
+  const candidates = [',', '\t', ';', '|'];
+  const sample = lines.slice(0, Math.min(10, lines.length));
+  let best = ',';
+  let bestScore = -1;
+  for (const d of candidates) {
+    const counts = sample.map(l => parseDelimitedLine(l, d).length);
+    const max = Math.max(...counts);
+    if (max < 2) continue;
+    // Reward many columns, penalise rows that disagree on column count
+    const consistent = counts.filter(c => c === max).length;
+    const score = max * 10 + consistent;
+    if (score > bestScore) { bestScore = score; best = d; }
+  }
+  return best;
+}
+
+function isNumericCell(cell) {
+  return parseAmountCell(cell) !== null;
+}
+
+// Handles "$1,234.56", "(123.45)", "123.45 CR", "-1234.56", "1 234,56"
+function parseAmountCell(cell) {
+  if (cell === undefined || cell === null) return null;
+  let s = String(cell).trim();
+  if (!s) return null;
+
+  let negative = false;
+  if (/^\(.*\)$/.test(s)) { negative = true; s = s.slice(1, -1); }
+  if (/\bcr\b/i.test(s)) { negative = true; }
+  if (/\bdr\b/i.test(s)) { negative = false; }
+  s = s.replace(/\b(cr|dr)\b/gi, '');
+  s = s.replace(/[$\s ]/g, '');
+
+  // Work out whether ',' is a decimal point or a thousands separator.
+  const hasDot = s.includes('.');
+  const hasComma = s.includes(',');
+  if (hasDot && hasComma) {
+    // Whichever comes last is the decimal separator
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+  } else if (hasComma) {
+    // A single comma with 1-2 trailing digits is a decimal comma ("45,50");
+    // anything else is a thousands separator ("1,234", "1,234,567")
+    if (/^-?\d+,\d{1,2}$/.test(s)) s = s.replace(',', '.');
+    else s = s.replace(/,/g, '');
+  }
+
+  if (!/^-?\d*\.?\d+$/.test(s)) return null;
+  const n = parseFloat(s);
+  if (isNaN(n)) return null;
+  return negative ? -Math.abs(n) : n;
+}
+
+function mapColumnsFromHeaders(headers) {
+  const find = (re, exclude) => headers.findIndex(h => re.test(h) && !(exclude && exclude.test(h)));
+  // "Value Date" must never be read as an amount, and "Balance" is not a transaction amount
+  const notDate = /date/;
+  const dateCol = find(/date|posted|processed/);
+  const debitCol = find(/debit|withdrawal|money out|paid out/);
+  const creditCol = find(/credit|deposit|money in|paid in/, /card|limit/);
+  let amountCol = find(/amount|value|transaction amount/, notDate);
+  if (amountCol === -1) amountCol = find(/^amt$/);
+  const descCol = find(/description|details|narrative|memo|merchant|payee|particulars|reference|transaction/, /date|amount|type/);
+  const descCol2 = headers.findIndex((h, i) => i !== descCol && /narrative|particulars|reference|memo/.test(h));
+  return { dateCol, amountCol, descCol, descCol2, creditCol, debitCol };
+}
+
+// No header row: work out which column is which by looking at the data itself
+function inferColumnsFromData(dataRows) {
+  const sample = dataRows.slice(0, Math.min(20, dataRows.length));
+  const colCount = Math.max(...sample.map(r => r.length));
+  let dateCol = -1, amountCol = -1, descCol = -1;
+
+  for (let c = 0; c < colCount; c++) {
+    const cells = sample.map(r => (r[c] || '').trim()).filter(Boolean);
+    if (!cells.length) continue;
+    const dateHits = cells.filter(v => parseStatementDate(v)).length;
+    const numHits = cells.filter(v => isNumericCell(v)).length;
+    if (dateCol === -1 && dateHits >= cells.length * 0.7) { dateCol = c; continue; }
+    if (amountCol === -1 && numHits >= cells.length * 0.7) { amountCol = c; continue; }
+  }
+  // Description = the widest mostly-text column
+  let bestLen = 0;
+  for (let c = 0; c < colCount; c++) {
+    if (c === dateCol || c === amountCol) continue;
+    const cells = sample.map(r => (r[c] || '').trim()).filter(Boolean);
+    if (!cells.length) continue;
+    const textCells = cells.filter(v => !isNumericCell(v));
+    if (textCells.length < cells.length * 0.5) continue;
+    const avgLen = textCells.reduce((s, v) => s + v.length, 0) / textCells.length;
+    if (avgLen > bestLen) { bestLen = avgLen; descCol = c; }
+  }
+  return { dateCol, amountCol, descCol, descCol2: -1, creditCol: -1, debitCol: -1 };
+}
 
 app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res) => {
   const { transactions } = req.body;
@@ -1290,6 +1794,7 @@ app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res)
 
   const db = await getDb();
   const client = await db.connect();
+  let added = 0;
   let importSkipped = 0;
   try {
     await client.query('BEGIN');
@@ -1303,6 +1808,7 @@ app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res)
         'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, NULL, 0)',
         [req.user.id, t.category, t.source || 'credit_card_statement', t.description, amt, t.expense_date, t.entry_type || 'actual']
       );
+      added++;
     }
     await client.query('COMMIT');
   } catch (err) {
@@ -1311,11 +1817,16 @@ app.post('/api/statements/import', authMiddleware, asyncHandler(async (req, res)
   } finally {
     client.release();
   }
-  res.json({ message: `${transactions.length} transactions imported as expenses` });
+  res.json({
+    message: `${added} transaction${added === 1 ? '' : 's'} imported as expenses${importSkipped ? `, ${importSkipped} skipped` : ''}`,
+    added,
+    skipped: importSkipped,
+    total: transactions.length,
+  });
 }));
 
-// CSV parsing helper — handles quoted fields
-function parseCSVLine(line) {
+// Delimited-line parser — handles quoted fields containing the delimiter
+function parseDelimitedLine(line, delimiter = ',') {
   const result = [];
   let current = '';
   let inQuotes = false;
@@ -1324,7 +1835,7 @@ function parseCSVLine(line) {
     if (ch === '"') {
       if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
       else { inQuotes = !inQuotes; }
-    } else if (ch === ',' && !inQuotes) {
+    } else if (ch === delimiter && !inQuotes) {
       result.push(current);
       current = '';
     } else {
@@ -1335,25 +1846,79 @@ function parseCSVLine(line) {
   return result;
 }
 
-// Date parsing for statement dates
+// Back-compat alias
+function parseCSVLine(line) { return parseDelimitedLine(line, ','); }
+
+const MONTH_NAMES = {
+  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+  jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+};
+
+// Date parsing for statement dates. Day-first (Australian) is assumed when ambiguous.
 function parseStatementDate(raw) {
-  if (!raw) return null;
-  // Try ISO format (2024-01-15)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  // Try DD/MM/YYYY (Australian format)
-  let m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  // Try DD/MM/YY
-  m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
-  if (m) return `20${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-  // Try "DD Mon YYYY" or "DD Mon YY"
-  const months = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
-  m = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})$/);
+  if (raw === undefined || raw === null) return null;
+  let s = String(raw).trim().replace(/^"|"$/g, '');
+  if (!s) return null;
+
+  // Strip a trailing time component ("2026-03-01 14:22:00", "01/03/2026 2:15 PM")
+  s = s.replace(/[T\s]+\d{1,2}:\d{2}(:\d{2})?(\s*[ap]\.?m\.?)?$/i, '').trim();
+
+  const valid = (y, m, d) => {
+    const yi = parseInt(y), mi = parseInt(m), di = parseInt(d);
+    if (mi < 1 || mi > 12 || di < 1 || di > 31) return null;
+    if (yi < 1990 || yi > 2100) return null;
+    return `${yi}-${String(mi).padStart(2, '0')}-${String(di).padStart(2, '0')}`;
+  };
+
+  // ISO: 2026-03-01 or 2026/03/01
+  let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+  if (m) return valid(m[1], m[2], m[3]);
+
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
   if (m) {
-    const yr = m[3].length === 2 ? '20' + m[3] : m[3];
-    const mo = months[m[2].toLowerCase().substring(0, 3)];
-    if (mo) return `${yr}-${mo}-${m[1].padStart(2, '0')}`;
+    // If the first number can't be a day but the second can, it's US-style MM/DD
+    if (parseInt(m[1]) > 12 || parseInt(m[2]) <= 12) return valid(m[3], m[2], m[1]);
+    return valid(m[3], m[1], m[2]);
   }
+
+  // DD/MM/YY
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/);
+  if (m) {
+    const yr = parseInt(m[3]) < 70 ? `20${m[3]}` : `19${m[3]}`;
+    if (parseInt(m[1]) > 12 || parseInt(m[2]) <= 12) return valid(yr, m[2], m[1]);
+    return valid(yr, m[1], m[2]);
+  }
+
+  // "01 Mar 2026", "01-Mar-26", "1 March 2026"
+  m = s.match(/^(\d{1,2})[\s\-]+([A-Za-z]{3,})[\s\-]+(\d{2,4})$/);
+  if (m) {
+    const mo = MONTH_NAMES[m[2].toLowerCase().substring(0, 3)];
+    const yr = m[3].length === 2 ? (parseInt(m[3]) < 70 ? `20${m[3]}` : `19${m[3]}`) : m[3];
+    if (mo) return valid(yr, mo, m[1]);
+  }
+
+  // "Mar 01, 2026" / "March 1 2026"
+  m = s.match(/^([A-Za-z]{3,})[\s\-]+(\d{1,2}),?[\s\-]+(\d{2,4})$/);
+  if (m) {
+    const mo = MONTH_NAMES[m[1].toLowerCase().substring(0, 3)];
+    const yr = m[3].length === 2 ? (parseInt(m[3]) < 70 ? `20${m[3]}` : `19${m[3]}`) : m[3];
+    if (mo) return valid(yr, mo, m[2]);
+  }
+
+  // "01 Mar" with no year — assume the most recent occurrence, never the future
+  m = s.match(/^(\d{1,2})[\s\-]+([A-Za-z]{3,})$/);
+  if (m) {
+    const mo = MONTH_NAMES[m[2].toLowerCase().substring(0, 3)];
+    if (mo) {
+      const now = new Date();
+      let yr = now.getFullYear();
+      const candidate = valid(yr, mo, m[1]);
+      if (candidate && candidate > now.toISOString().split('T')[0]) yr -= 1;
+      return valid(yr, mo, m[1]);
+    }
+  }
+
   return null;
 }
 
@@ -1406,12 +1971,26 @@ app.post('/api/screenshots/extract', authMiddleware, asyncHandler(async (req, re
 
     // Auto-categorize each extracted transaction (using learned rules)
     const learnedRules = await getCategoryRules();
-    const categorized = result.transactions.map(t => ({
-      ...t,
-      category: autoCategorizeTxn(t.description, learnedRules)
-    }));
+    const categorized = result.transactions.map(t => {
+      const { category, confidence, matched } = categorizeTxnDetailed(t.description || '', learnedRules);
+      return {
+        ...t,
+        category,
+        confidence,
+        matched,
+        is_transfer: category === 'Transfer',
+        needs_review: confidence === 'low' || category === 'Transfer',
+      };
+    });
 
-    res.json({ transactions: categorized });
+    res.json({
+      transactions: categorized,
+      summary: {
+        parsed: categorized.length,
+        low_confidence: categorized.filter(t => t.confidence === 'low').length,
+        transfers: categorized.filter(t => t.is_transfer).length,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1425,18 +2004,13 @@ app.post('/api/screenshots/import', authMiddleware, asyncHandler(async (req, res
 
     const userId = req.user.id;
 
-    function parseDate(dateStr) {
-      const [day, month, year] = dateStr.split('/');
-      const fullYear = year.length === 4 ? year : (parseInt(year) < 50 ? `20${year}` : `19${year}`);
-      return `${fullYear}-${month}-${day}`;
-    }
-
     let added = 0, skipped = 0;
     const client = await db.connect();
     try {
       await client.query('BEGIN');
       for (const t of transactions) {
-        const date = parseDate(t.date);
+        const date = parseStatementDate(t.date);
+        if (!date) { skipped++; continue; }
         const category = t.category || autoCategorizeTxn(t.description);
         const amt = parseFloat(String(t.amount || '').replace(/[$,]/g, ''));
         if (!amt || isNaN(amt)) { skipped++; continue; }
@@ -1781,9 +2355,9 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
   const thirtyDaysAgo = clampDate(new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0]);
   const sevenDaysAgo = clampDate(new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]);
 
-  const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [thirtyDaysAgo])).rows[0];
+  const monthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [thirtyDaysAgo, NON_SPENDING_CATEGORIES])).rows[0];
   const coreMonthlyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [thirtyDaysAgo, OUTLIER_CATEGORIES])).rows[0];
-  const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1', [sevenDaysAgo])).rows[0];
+  const weeklyExpenses = (await db.query('SELECT SUM(amount) as total FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2))', [sevenDaysAgo, NON_SPENDING_CATEGORIES])).rows[0];
   const monthlyIncome = (await db.query('SELECT SUM(COALESCE(net_amount, amount)) as total FROM income_entries WHERE pay_date >= $1', [thirtyDaysAgo])).rows[0];
 
   const expensesByCategory = (await db.query(
@@ -1928,51 +2502,151 @@ app.get('/api/dashboard', authMiddleware, asyncHandler(async (req, res) => {
 
 // ===================== DATA BACKUP =====================
 
-// Full JSON backup of all data (for disaster recovery)
+// Full JSON backup of all data (for disaster recovery / moving hosts).
+// Pass ?include_credentials=1 to include password hashes so the restored copy
+// can be logged into with the same passwords.
 app.get('/api/backup', authMiddleware, asyncHandler(async (req, res) => {
   const db = await getDb();
+  const withCreds = req.query.include_credentials === '1' || req.query.include_credentials === 'true';
+  const userCols = withCreds
+    ? 'id, username, display_name, password_hash, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution'
+    : 'id, username, display_name, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle, mortgage_contribution';
+
+  const safeQuery = async (sql) => {
+    try { return (await db.query(sql)).rows; }
+    catch { return []; } // table may not exist on older databases
+  };
+
   const backup = {
     exported_at: new Date().toISOString(),
-    users: (await db.query('SELECT id, username, display_name, role, gross_income, super_rate, hecs_repayment_rate, pay_cycle FROM users')).rows,
-    expenses: (await db.query('SELECT * FROM expenses ORDER BY expense_date DESC')).rows,
-    income_entries: (await db.query('SELECT * FROM income_entries ORDER BY pay_date DESC')).rows,
-    fund_allocations: (await db.query('SELECT * FROM fund_allocations ORDER BY allocated_date DESC')).rows,
-    savings_goals: (await db.query('SELECT * FROM savings_goals')).rows,
-    levers: (await db.query('SELECT * FROM levers')).rows,
-    account_balances: (await db.query('SELECT * FROM account_balances ORDER BY updated_at DESC')).rows,
-    category_budgets: (await db.query('SELECT * FROM category_budgets')).rows,
-    upcoming_expenses: (await db.query('SELECT * FROM upcoming_expenses')).rows,
-    deleted_expenses: (await db.query('SELECT * FROM deleted_expenses')).rows,
+    schema_version: 2,
+    includes_credentials: withCreds,
+    users: await safeQuery(`SELECT ${userCols} FROM users ORDER BY id`),
+    expenses: await safeQuery('SELECT * FROM expenses ORDER BY id'),
+    income_entries: await safeQuery('SELECT * FROM income_entries ORDER BY id'),
+    fund_allocations: await safeQuery('SELECT * FROM fund_allocations ORDER BY id'),
+    savings_goals: await safeQuery('SELECT * FROM savings_goals ORDER BY id'),
+    goal_contributions: await safeQuery('SELECT * FROM goal_contributions ORDER BY id'),
+    levers: await safeQuery('SELECT * FROM levers ORDER BY id'),
+    account_balances: await safeQuery('SELECT * FROM account_balances ORDER BY id'),
+    category_budgets: await safeQuery('SELECT * FROM category_budgets ORDER BY id'),
+    category_rules: await safeQuery('SELECT * FROM category_rules ORDER BY id'),
+    retention_profiles: await safeQuery('SELECT * FROM retention_profiles ORDER BY id'),
+    upcoming_expenses: await safeQuery('SELECT * FROM upcoming_expenses ORDER BY id'),
+    deleted_expenses: await safeQuery('SELECT * FROM deleted_expenses ORDER BY id'),
+    offset_withdrawals: await safeQuery('SELECT * FROM offset_withdrawals ORDER BY id'),
+    planned_withdrawals: await safeQuery('SELECT * FROM planned_withdrawals ORDER BY id'),
+    weekly_checkins: await safeQuery('SELECT * FROM weekly_checkins ORDER BY id'),
   };
   res.setHeader('Content-Disposition', `attachment; filename=budget_backup_${new Date().toISOString().split('T')[0]}.json`);
   res.json(backup);
 }));
 
-// Restore data from JSON backup
+// Restore from a JSON backup. Default mode 'merge' only adds rows that aren't
+// already present. Mode 'replace' wipes the listed tables first — use when
+// seeding a brand-new self-hosted database from an export.
 app.post('/api/backup/restore', authMiddleware, asyncHandler(async (req, res) => {
-  const { backup } = req.body;
-  if (!backup || !backup.expenses) {
+  const { backup, mode } = req.body;
+  if (!backup || typeof backup !== 'object') {
     return res.status(400).json({ error: 'Invalid backup data' });
   }
+  const replace = mode === 'replace';
   const db = await getDb();
   const client = await db.connect();
-  let restored = 0;
-  try {
-    await client.query('BEGIN');
-    for (const e of backup.expenses) {
-      // Check if this expense already exists
-      const existing = (await client.query(
-        'SELECT id FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4',
-        [e.user_id, e.description, e.amount, e.expense_date]
-      )).rows[0];
-      if (!existing) {
-        await client.query(
-          'INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type, is_range, range_low, range_high, recurring) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
-          [e.user_id, e.category, e.subcategory || null, e.description, e.amount, e.expense_date, e.entry_type || 'actual', e.is_range || 0, e.range_low || null, e.range_high || null, e.recurring || 0]
-        );
-        restored++;
+  const counts = {};
+
+  // Child tables first so foreign keys stay satisfied when wiping
+  const WIPE_ORDER = [
+    'goal_contributions', 'offset_withdrawals', 'planned_withdrawals', 'fund_allocations',
+    'income_entries', 'expenses', 'account_balances', 'upcoming_expenses', 'deleted_expenses',
+    'weekly_checkins', 'retention_profiles', 'category_rules', 'category_budgets',
+    'savings_goals', 'levers',
+  ];
+
+  // Insert rows verbatim, preserving ids, skipping conflicts
+  async function restoreTable(table, rows) {
+    if (!Array.isArray(rows) || rows.length === 0) { counts[table] = 0; return; }
+    // Only keep columns that actually exist in this database
+    const existing = (await client.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_name = $1', [table]
+    )).rows.map(r => r.column_name);
+    if (!existing.length) { counts[table] = 0; return; }
+
+    let inserted = 0;
+    for (const row of rows) {
+      const cols = Object.keys(row).filter(c => existing.includes(c) && row[c] !== undefined);
+      if (!cols.length) continue;
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const values = cols.map(c => row[c]);
+      const sql = `INSERT INTO ${table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
+      try {
+        const r = await client.query(sql, values);
+        inserted += r.rowCount || 0;
+      } catch (e) {
+        // Skip rows that violate constraints rather than failing the whole restore
       }
     }
+    counts[table] = inserted;
+
+    // Move the id sequence past the restored rows
+    if (existing.includes('id')) {
+      try {
+        await client.query(
+          `SELECT setval(pg_get_serial_sequence('${table}', 'id'), COALESCE((SELECT MAX(id) FROM ${table}), 1), true)`
+        );
+      } catch (e) { /* table may not use a serial id */ }
+    }
+  }
+
+  try {
+    await client.query('BEGIN');
+
+    if (replace) {
+      for (const t of WIPE_ORDER) {
+        try { await client.query(`DELETE FROM ${t}`); } catch (e) { /* table may not exist */ }
+      }
+    }
+
+    // Users first — everything else references them
+    if (Array.isArray(backup.users) && backup.users.length) {
+      const existingCols = (await client.query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'users'"
+      )).rows.map(r => r.column_name);
+      let userCount = 0;
+      for (const u of backup.users) {
+        const cols = Object.keys(u).filter(c => existingCols.includes(c) && u[c] !== undefined);
+        if (!cols.includes('password_hash')) {
+          // Backup had no credentials — keep any existing hash, else set a placeholder
+          const current = (await client.query('SELECT password_hash FROM users WHERE id = $1 OR username = $2', [u.id, u.username])).rows[0];
+          u.password_hash = current?.password_hash || bcrypt.hashSync('ChangeMe123', 10);
+          cols.push('password_hash');
+        }
+        const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+        const updates = cols.filter(c => c !== 'id' && c !== 'username').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
+        const sql = `INSERT INTO users (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})
+                     ON CONFLICT (username) DO UPDATE SET ${updates || 'username = EXCLUDED.username'}`;
+        try {
+          await client.query(sql, cols.map(c => u[c]));
+          userCount++;
+        } catch (e) { /* skip bad user row */ }
+      }
+      counts.users = userCount;
+      try {
+        await client.query("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)");
+      } catch (e) { /* ignore */ }
+    }
+
+    // Parents before children
+    const ORDER = [
+      'levers', 'savings_goals', 'category_budgets', 'category_rules', 'retention_profiles',
+      'expenses', 'income_entries', 'fund_allocations', 'goal_contributions',
+      'account_balances', 'offset_withdrawals', 'planned_withdrawals',
+      'upcoming_expenses', 'deleted_expenses', 'weekly_checkins',
+    ];
+    for (const table of ORDER) {
+      await restoreTable(table, backup[table]);
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1980,7 +2654,13 @@ app.post('/api/backup/restore', authMiddleware, asyncHandler(async (req, res) =>
   } finally {
     client.release();
   }
-  res.json({ message: `Restored ${restored} expenses`, total_in_backup: backup.expenses.length });
+
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
+  res.json({
+    message: `Restored ${total} rows across ${Object.keys(counts).length} tables`,
+    mode: replace ? 'replace' : 'merge',
+    counts,
+  });
 }));
 
 // ===================== EXPORT =====================
@@ -2348,7 +3028,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   }
 
   const monthlyNetIncome = totalAnnualNet / 12;
-  const monthlySurplus = monthlyNetIncome - monthlyExpenseAtPace;
+  const estimatedSurplus = monthlyNetIncome - monthlyExpenseAtPace;
 
   const offsetRow = (await db.query("SELECT balance FROM account_balances WHERE account_type = 'offset' ORDER BY updated_at DESC LIMIT 1")).rows[0];
   const offsetBalance = offsetRow ? parseFloat(offsetRow.balance) : 0;
@@ -2359,6 +3039,63 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
   const budgetScale = (levers.find(l => l.name.includes('Budget Scale'))?.value || 100) / 100;
   const totalMonthlyBudget = budgets.reduce((sum, b) => sum + b.monthly_amount * budgetScale, 0);
   const budgetedSurplus = monthlyNetIncome - totalMonthlyBudget;
+
+  // ── What actually landed in the offset, measured rather than estimated ──
+  // This is the honest number: real pay transfers in, real withdrawals out.
+  const sixMonthsAgo = clampDate(new Date(Date.now() - 182 * 86400000).toISOString().split('T')[0]);
+  const actualIn6mo = parseFloat((await db.query(
+    'SELECT SUM(COALESCE(offset_transfer, 0)) as total FROM income_entries WHERE pay_date >= $1', [sixMonthsAgo]
+  )).rows[0]?.total) || 0;
+  const actualWithdrawn6mo = parseFloat((await db.query(
+    'SELECT SUM(amount) as total FROM offset_withdrawals WHERE withdrawal_date >= $1', [sixMonthsAgo]
+  )).rows[0]?.total) || 0;
+  const firstPay = (await db.query(
+    'SELECT MIN(pay_date) as d FROM income_entries WHERE pay_date >= $1 AND COALESCE(offset_transfer, 0) > 0', [sixMonthsAgo]
+  )).rows[0]?.d;
+  // pay_date is TEXT and may arrive as 'YYYY-MM-DD' or a full timestamp — take the date part only
+  const firstPayDay = firstPay ? String(firstPay).slice(0, 10) : null;
+  const firstPayMs = firstPayDay ? new Date(firstPayDay + 'T00:00:00Z').getTime() : NaN;
+  const observedMonths = Number.isFinite(firstPayMs)
+    ? Math.max(1, (Date.now() - firstPayMs) / (86400000 * 30.44))
+    : 1;
+  // Gross into offset per month, before the mortgage debit leaves again
+  const actualMonthlyIn = actualIn6mo / observedMonths;
+  const actualMonthlyWithdrawn = actualWithdrawn6mo / observedMonths;
+  const actualSurplus = actualMonthlyIn - actualMonthlyWithdrawn;
+
+  // Which basis drives the projection: measured (default), estimated, or budget
+  const requestedBasis = ['actual', 'estimated', 'budget'].includes(req.query.basis) ? req.query.basis : 'actual';
+  const haveActuals = actualIn6mo > 0;
+  // Without real pay data the measured basis is meaningless, so fall back and say so
+  const basis = (requestedBasis === 'actual' && !haveActuals) ? 'estimated' : requestedBasis;
+  const basisFellBack = basis !== requestedBasis;
+  const monthlySurplus = basis === 'estimated' ? estimatedSurplus
+    : basis === 'budget' ? budgetedSurplus
+    : actualSurplus;
+
+  // Future one-off and recurring withdrawals the user has told us about
+  const plannedWithdrawals = (await db.query(
+    'SELECT * FROM planned_withdrawals WHERE active = 1'
+  )).rows.map(p => ({
+    ...p,
+    amount: parseFloat(p.amount),
+    recurring: !!p.recurring,
+    frequency_months: parseInt(p.frequency_months) || 0,
+  }));
+
+  // Map planned withdrawals onto month offsets from now
+  function plannedWithdrawalForMonth(monthOffset, monthDate) {
+    let total = 0;
+    for (const p of plannedWithdrawals) {
+      if (p.recurring && p.frequency_months > 0) {
+        if (monthOffset > 0 && monthOffset % p.frequency_months === 0) total += p.amount;
+      } else if (p.target_date) {
+        const t = new Date(p.target_date + 'T00:00:00');
+        if (t.getFullYear() === monthDate.getFullYear() && t.getMonth() === monthDate.getMonth()) total += p.amount;
+      }
+    }
+    return total;
+  }
 
   // ── Mortgage amortization calculations ──
   const now = new Date();
@@ -2412,6 +3149,9 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
       balNoOff = Math.max(0, balNoOff - princNoOff);
     }
 
+    // Planned spending out of the offset lands in the month it's due
+    const planned = plannedWithdrawalForMonth(m, date);
+
     // With offset path — surplus flows in, mortgage payment flows out
     if (projBalance > 0) {
       const effectiveBalance = Math.max(0, projBalance - projOffset);
@@ -2419,8 +3159,11 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
       totalInterestWithOffset += interest;
       const principalPaid = Math.min(mc.monthlyPayment - interest, projBalance);
       projBalance = Math.max(0, projBalance - principalPaid);
-      projOffset = Math.max(0, projOffset + monthlySurplus - mc.monthlyPayment);
+      projOffset = Math.max(0, projOffset + monthlySurplus - mc.monthlyPayment - planned);
       if (projBalance <= 0 && !payoffMonth) payoffMonth = m;
+    } else {
+      // Mortgage gone: the payment stays in your pocket, planned spending still applies
+      projOffset = Math.max(0, projOffset + monthlySurplus - planned);
     }
 
     if (m <= projectionMonths) {
@@ -2429,6 +3172,7 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
         offset: Math.round(projOffset),
         mortgage_remaining: Math.round(projBalance),
         mortgage_no_offset: Math.round(balNoOff),
+        planned_withdrawal: Math.round(planned),
         interest_saved_monthly: Math.round(Math.max(0, projBalance * mc.monthlyRate - Math.max(0, projBalance - projOffset) * mc.monthlyRate)),
         net_growth: Math.round(netOffsetGrowth),
       });
@@ -2501,12 +3245,151 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
     }
   });
 
-  // Goal achievement forecast
+  // ── Spending & saving patterns: what the data actually says ──
+  const twelveMonthsAgo = clampDate(new Date(Date.now() - 365 * 86400000).toISOString().split('T')[0]);
+
+  const monthlyHistory = (await db.query(
+    `SELECT to_char(expense_date::date, 'YYYY-MM') as month,
+            SUM(amount) as total,
+            SUM(CASE WHEN NOT (category = ANY($2)) THEN amount ELSE 0 END) as core_total,
+            COUNT(*) as txns
+     FROM expenses
+     WHERE expense_date >= $1 AND NOT (category = ANY($3))
+     GROUP BY 1 ORDER BY 1`,
+    [twelveMonthsAgo, OUTLIER_CATEGORIES, NON_SPENDING_CATEGORIES]
+  )).rows.map(r => ({
+    month: r.month,
+    total: Math.round(parseFloat(r.total)),
+    core_total: Math.round(parseFloat(r.core_total)),
+    txns: parseInt(r.txns),
+  }));
+
+  // Only compare whole months — the current partial month would look artificially low
+  const currentMonthKey = new Date().toISOString().substring(0, 7);
+  const completeMonths = monthlyHistory.filter(m => m.month !== currentMonthKey);
+  const avgMonthlySpend = completeMonths.length
+    ? completeMonths.reduce((s, m) => s + m.total, 0) / completeMonths.length : 0;
+  const last3 = completeMonths.slice(-3);
+  const prev3 = completeMonths.slice(-6, -3);
+  const avgLast3 = last3.length ? last3.reduce((s, m) => s + m.total, 0) / last3.length : 0;
+  const avgPrev3 = prev3.length ? prev3.reduce((s, m) => s + m.total, 0) / prev3.length : 0;
+  const spendTrendPct = avgPrev3 > 0 ? Math.round(((avgLast3 - avgPrev3) / avgPrev3) * 100) : 0;
+
+  // Category movers: last 90 days vs the 90 before that
+  const ninetyStart = clampDate(new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0]);
+  const oneEightyStart = clampDate(new Date(Date.now() - 180 * 86400000).toISOString().split('T')[0]);
+  const recentByCat = (await db.query(
+    `SELECT category, SUM(amount) as total FROM expenses
+     WHERE expense_date >= $1 AND NOT (category = ANY($2)) GROUP BY category`,
+    [ninetyStart, NON_SPENDING_CATEGORIES]
+  )).rows;
+  const priorByCat = (await db.query(
+    `SELECT category, SUM(amount) as total FROM expenses
+     WHERE expense_date >= $1 AND expense_date < $2 AND NOT (category = ANY($3)) GROUP BY category`,
+    [oneEightyStart, ninetyStart, NON_SPENDING_CATEGORIES]
+  )).rows;
+  const priorMap = Object.fromEntries(priorByCat.map(r => [r.category, parseFloat(r.total)]));
+  const categoryMovers = recentByCat.map(r => {
+    const now3 = parseFloat(r.total) / 3;
+    const then3 = (priorMap[r.category] || 0) / 3;
+    return {
+      category: r.category,
+      monthly_now: Math.round(now3),
+      monthly_before: Math.round(then3),
+      change: Math.round(now3 - then3),
+      change_pct: then3 > 0 ? Math.round(((now3 - then3) / then3) * 100) : null,
+    };
+  }).sort((a, b) => Math.abs(b.change) - Math.abs(a.change)).slice(0, 8);
+
+  // Likely recurring commitments — same merchant, similar amount, 3+ times
+  const recurring = (await db.query(
+    `SELECT description, category, COUNT(*) as hits, AVG(amount) as avg_amount,
+            STDDEV_POP(amount) as spread, MAX(expense_date) as last_seen
+     FROM expenses
+     WHERE expense_date >= $1 AND description IS NOT NULL AND description <> ''
+       AND NOT (category = ANY($2))
+     GROUP BY description, category
+     HAVING COUNT(*) >= 3 AND AVG(amount) > 5
+     ORDER BY AVG(amount) * COUNT(*) DESC LIMIT 15`,
+    [twelveMonthsAgo, NON_SPENDING_CATEGORIES]
+  )).rows
+    .filter(r => {
+      const avg = parseFloat(r.avg_amount);
+      const spread = parseFloat(r.spread) || 0;
+      return avg > 0 && spread / avg < 0.15; // consistent amount => subscription-like
+    })
+    .map(r => ({
+      description: r.description,
+      category: r.category,
+      hits: parseInt(r.hits),
+      avg_amount: Math.round(parseFloat(r.avg_amount) * 100) / 100,
+      last_seen: r.last_seen,
+    }));
+  const recurringMonthly = recurring.reduce((s, r) => s + r.avg_amount, 0);
+
+  // Weekday vs weekend habit split
+  const dayRows = (await db.query(
+    `SELECT EXTRACT(DOW FROM expense_date::date) as dow, SUM(amount) as total, COUNT(*) as cnt
+     FROM expenses WHERE expense_date >= $1 AND NOT (category = ANY($2)) GROUP BY 1`,
+    [ninetyStart, NON_SPENDING_CATEGORIES]
+  )).rows;
+  const weekendSpend = dayRows.filter(r => [0, 6].includes(parseInt(r.dow))).reduce((s, r) => s + parseFloat(r.total), 0);
+  const weekdaySpend = dayRows.filter(r => ![0, 6].includes(parseInt(r.dow))).reduce((s, r) => s + parseFloat(r.total), 0);
+  const totalDaySpend = weekendSpend + weekdaySpend;
+
+  // Saving consistency: how much actually hit the offset each month
+  const savingHistory = (await db.query(
+    `SELECT to_char(pay_date::date, 'YYYY-MM') as month, SUM(COALESCE(offset_transfer, 0)) as total
+     FROM income_entries WHERE pay_date >= $1 GROUP BY 1 ORDER BY 1`,
+    [twelveMonthsAgo]
+  )).rows.map(r => ({ month: r.month, total: Math.round(parseFloat(r.total)) }));
+  const completeSaving = savingHistory.filter(m => m.month !== currentMonthKey);
+  const avgSaved = completeSaving.length ? completeSaving.reduce((s, m) => s + m.total, 0) / completeSaving.length : 0;
+  const savingVariance = completeSaving.length > 1
+    ? Math.sqrt(completeSaving.reduce((s, m) => s + Math.pow(m.total - avgSaved, 2), 0) / completeSaving.length)
+    : 0;
+
+  const patterns = {
+    monthly_history: monthlyHistory,
+    avg_monthly_spend: Math.round(avgMonthlySpend),
+    avg_last_3mo: Math.round(avgLast3),
+    avg_prev_3mo: Math.round(avgPrev3),
+    spend_trend_pct: spendTrendPct,
+    spend_direction: spendTrendPct > 5 ? 'rising' : spendTrendPct < -5 ? 'falling' : 'steady',
+    category_movers: categoryMovers,
+    recurring_commitments: recurring,
+    recurring_monthly_total: Math.round(recurringMonthly),
+    weekend_share_pct: totalDaySpend > 0 ? Math.round((weekendSpend / totalDaySpend) * 100) : 0,
+    saving_history: savingHistory,
+    avg_monthly_saved: Math.round(avgSaved),
+    saving_consistency: avgSaved > 0
+      ? (savingVariance / avgSaved < 0.15 ? 'very consistent'
+        : savingVariance / avgSaved < 0.35 ? 'fairly consistent' : 'variable')
+      : 'no data',
+    months_of_expenses_in_offset: avgMonthlySpend > 0
+      ? Math.round((offsetBalance / avgMonthlySpend) * 10) / 10 : null,
+  };
+
+  // Goal achievement forecast — share the real surplus by priority weighting
+  const activeGoals = goals.filter(g => (g.target_amount || 0) > (g.current_amount || 0));
+  const priorityWeights = activeGoals.map(g => 1 / Math.max(1, g.priority || 5));
+  const weightSum = priorityWeights.reduce((s, w) => s + w, 0) || 1;
   const goalForecasts = goals.map(g => {
-    const remaining = g.target_amount - g.current_amount;
-    const monthlyContrib = Math.max(0, budgetedSurplus) * 0.1;
-    const monthsToGoal = monthlyContrib > 0 ? Math.ceil(remaining / monthlyContrib) : null;
-    return { ...g, months_to_goal: monthsToGoal };
+    const remaining = Math.max(0, (g.target_amount || 0) - (g.current_amount || 0));
+    const idx = activeGoals.findIndex(a => a.id === g.id);
+    const share = idx >= 0 ? priorityWeights[idx] / weightSum : 0;
+    const monthlyContrib = Math.max(0, monthlySurplus) * share;
+    const monthsToGoal = remaining <= 0 ? 0 : (monthlyContrib > 0 ? Math.ceil(remaining / monthlyContrib) : null);
+    const eta = monthsToGoal !== null && monthsToGoal > 0
+      ? new Date(new Date().setMonth(new Date().getMonth() + monthsToGoal)).toISOString().split('T')[0]
+      : null;
+    return {
+      ...g,
+      remaining: Math.round(remaining),
+      monthly_contribution: Math.round(monthlyContrib),
+      months_to_goal: monthsToGoal,
+      eta,
+    };
   });
 
   // Sydney benchmarks
@@ -2566,6 +3449,24 @@ app.get('/api/projections', authMiddleware, asyncHandler(async (req, res) => {
       total_added_3mo: Math.round(totalAddedToOffset),
       total_debited_3mo: Math.round(totalDebitedFromOffset),
     },
+    // Which number drives the projection, and what the alternatives would be
+    basis,
+    requested_basis: requestedBasis,
+    basis_fell_back: basisFellBack,
+    basis_options: {
+      actual: haveActuals ? Math.round(actualSurplus) : null,
+      estimated: Math.round(estimatedSurplus),
+      budget: Math.round(budgetedSurplus),
+    },
+    basis_detail: {
+      have_actuals: haveActuals,
+      observed_months: Math.round(observedMonths * 10) / 10,
+      actual_monthly_in: Math.round(actualMonthlyIn),
+      actual_monthly_withdrawn: Math.round(actualMonthlyWithdrawn),
+    },
+    planned_withdrawals: plannedWithdrawals,
+    planned_withdrawals_total: Math.round(plannedWithdrawals.reduce((s, p) => s + p.amount, 0)),
+    patterns,
     projections,
     projection_months: projectionMonths,
     milestones,

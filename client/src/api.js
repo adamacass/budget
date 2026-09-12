@@ -66,7 +66,20 @@ export const updateBudget = (category, monthly_amount) => apiFetch(`/api/budgets
 
 // Balances
 export const getBalances = () => apiFetch('/api/balances');
-export const updateBalance = (account, balance) => apiFetch(`/api/balances/${account}`, { method: 'PUT', body: JSON.stringify({ balance }) });
+export const updateBalance = (account, balance, note) => apiFetch(`/api/balances/${account}`, { method: 'PUT', body: JSON.stringify({ balance, note }) });
+
+// Offset: reset, withdrawals, ledger
+export const getOffsetSummary = () => apiFetch('/api/offset/summary');
+export const resetOffset = (data) => apiFetch('/api/offset/reset', { method: 'POST', body: JSON.stringify(data) });
+export const withdrawFromOffset = (data) => apiFetch('/api/offset/withdraw', { method: 'POST', body: JSON.stringify(data) });
+export const getOffsetWithdrawals = (limit = 100) => apiFetch(`/api/offset/withdrawals?limit=${limit}`);
+export const deleteOffsetWithdrawal = (id) => apiFetch(`/api/offset/withdrawals/${id}`, { method: 'DELETE' });
+export const getOffsetLedger = (days = 180) => apiFetch(`/api/offset/ledger?days=${days}`);
+
+// Planned (future) withdrawals — feed the projections
+export const getPlannedWithdrawals = () => apiFetch('/api/planned-withdrawals');
+export const addPlannedWithdrawal = (data) => apiFetch('/api/planned-withdrawals', { method: 'POST', body: JSON.stringify(data) });
+export const deletePlannedWithdrawal = (id) => apiFetch(`/api/planned-withdrawals/${id}`, { method: 'DELETE' });
 
 // Goals
 export const getGoals = () => apiFetch('/api/goals');
@@ -123,6 +136,10 @@ export const getCategoryRules = () => apiFetch('/api/category-rules');
 export const saveCategoryRule = (supplier_pattern, category) => apiFetch('/api/category-rules', { method: 'POST', body: JSON.stringify({ supplier_pattern, category }) });
 export const deleteCategoryRule = (id) => apiFetch(`/api/category-rules/${id}`, { method: 'DELETE' });
 
+// Bulk re-categorisation (preview by default, apply:true to write)
+export const recategorizeExpenses = (opts = {}) => apiFetch('/api/expenses/recategorize', { method: 'POST', body: JSON.stringify(opts) });
+export const getCategorizationGaps = () => apiFetch('/api/categorization-gaps');
+
 // Widget
 export const getWidgetData = () => apiFetch('/api/widget');
 
@@ -143,9 +160,9 @@ export const getProjections = (params = {}) => {
 };
 
 // Backup
-export const downloadBackup = async () => {
+export const downloadBackup = async (includeCredentials = false) => {
   const token = localStorage.getItem('token');
-  const res = await fetch(`${API}/api/backup`, {
+  const res = await fetch(`${API}/api/backup${includeCredentials ? '?include_credentials=1' : ''}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
   if (!res.ok) throw new Error('Backup failed');
@@ -157,7 +174,7 @@ export const downloadBackup = async () => {
   a.click();
   URL.revokeObjectURL(url);
 };
-export const restoreBackup = (backup) => apiFetch('/api/backup/restore', { method: 'POST', body: JSON.stringify({ backup }) });
+export const restoreBackup = (backup, mode = 'merge') => apiFetch('/api/backup/restore', { method: 'POST', body: JSON.stringify({ backup, mode }) });
 
 // AI Analysis Export
 export const exportForAI = async (params = {}) => {

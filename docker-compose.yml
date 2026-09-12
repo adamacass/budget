@@ -1,0 +1,94 @@
+# Household budget app — self-hosted stack.
+#
+#   docker compose up -d --build     start everything
+#   docker compose logs -f app       watch the app
+#   docker compose down              stop (data survives in the named volume)
+#
+# Values come from the .env file sitting next to this file.
+# Copy .env.docker.example to .env first.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-budget}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-budget}
+      POSTGRES_DB: ${POSTGRES_DB:-budget}
+      # Keeps the data directory tidy on a subpath of the volume mount.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - budget-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-budget} -d ${POSTGRES_DB:-budget}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Postgres is deliberately NOT published to the host. The app reaches it over
+    # the private compose network, and nothing else needs to.
+    #
+    # Uncomment to run pg_dump / psql / a GUI client straight from your desktop.
+    # 5433 on the host avoids clashing with a locally installed Postgres.
+    # ports:
+    #   - "127.0.0.1:5433:5432"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      # Keep the ?sslmode=disable on the end.
+      #
+      # A plain postgres:16-alpine container speaks no TLS, so the client must not
+      # ask for it, or the connection dies with "The server does not support SSL
+      # connections". Two independent things prevent that, and the URL suffix is
+      # the one that holds no matter what:
+      #   1. server/db.js checks for sslmode=disable in the URL (and also treats
+      #      the host "db" as local), so it passes ssl:false to the pool; and
+      #   2. even if that check changed, node-postgres parses the connection
+      #      string AFTER the options given in code and lets sslmode=disable
+      #      override them.
+      # Leaving it in costs nothing and survives either layer being reworked.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://budget:budget@db:5432/budget?sslmode=disable}
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET is not set. Copy .env.docker.example to .env and generate one with `openssl rand -base64 32`}"
+      # Optional. Without it the AI features return a "not configured" message
+      # instead of advice; everything else works normally.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      # host:container — change APP_PORT in .env if 8080 is taken.
+      - "${APP_PORT:-8080}:4000"
+
+  # ---------------------------------------------------------------------------
+  # Optional: a browser-based Postgres client, for poking at the data directly.
+  # Uncomment this block, run `docker compose up -d pgadmin`, open
+  # http://localhost:5050 and log in with the email/password below. Then add a
+  # server with host "db", port 5432, and the POSTGRES_USER/PASSWORD from .env.
+  #
+  # Simpler alternative that needs no extra container:
+  #   docker compose exec db psql -U budget -d budget
+  # ---------------------------------------------------------------------------
+  # pgadmin:
+  #   image: dpage/pgadmin4:latest
+  #   restart: unless-stopped
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@example.com
+  #     PGADMIN_DEFAULT_PASSWORD: admin
+  #     PGADMIN_CONFIG_SERVER_MODE: "False"
+  #   ports:
+  #     - "127.0.0.1:5050:80"
+  #   volumes:
+  #     - budget-pgadmin:/var/lib/pgadmin
+
+volumes:
+  budget-db-data:
+  # budget-pgadmin:

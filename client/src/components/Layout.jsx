@@ -2,21 +2,38 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Settings, Download, CreditCard, PiggyBank, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Settings, Download, CreditCard, PiggyBank, Sun, Moon, Landmark } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
 const buildTime = typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : null;
 
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/expenses', icon: Receipt, label: 'Expenses' },
-  { to: '/budget', icon: PiggyBank, label: 'Budget' },
-  { to: '/payday', icon: Wallet, label: 'Pay Day' },
-  { to: '/goals', icon: Target, label: 'Goals & Levers' },
-  { to: '/projections', icon: TrendingUp, label: 'Projections' },
-  { to: '/statements', icon: CreditCard, label: 'Import Statement' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+// Grouped so the sidebar reads as three short lists rather than one long one
+const navGroups = [
+  {
+    label: 'Day to day',
+    items: [
+      { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+      { to: '/expenses', icon: Receipt, label: 'Expenses' },
+      { to: '/budget', icon: PiggyBank, label: 'Budget' },
+    ],
+  },
+  {
+    label: 'Money',
+    items: [
+      { to: '/payday', icon: Wallet, label: 'Pay Day' },
+      { to: '/offset', icon: Landmark, label: 'Offset' },
+      { to: '/goals', icon: Target, label: 'Goals & Levers' },
+      { to: '/projections', icon: TrendingUp, label: 'Projections' },
+    ],
+  },
+  {
+    label: 'Data',
+    items: [
+      { to: '/statements', icon: CreditCard, label: 'Import' },
+      { to: '/settings', icon: Settings, label: 'Settings' },
+    ],
+  },
 ];
 
 function formatDateTime(iso) {
@@ -57,16 +74,21 @@ export default function Layout() {
         </div>
 
         <div className="sidebar-nav">
-          {navItems.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
-            >
-              <Icon />
-              <span>{label}</span>
-            </NavLink>
+          {navGroups.map(group => (
+            <div key={group.label} className="sidebar-group">
+              <div className="sidebar-group-label">{group.label}</div>
+              {group.items.map(({ to, icon: Icon, label }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={to === '/'}
+                  className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                >
+                  <Icon />
+                  <span>{label}</span>
+                </NavLink>
+              ))}
+            </div>
           ))}
           <button className="sidebar-link" onClick={() => exportToExcel()} title="Export to Excel">
             <Download />

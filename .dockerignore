@@ -1,0 +1,35 @@
+# Keep the build context small and stop host-built artefacts leaking into the
+# image. Anything listed here is invisible to COPY in the Dockerfile.
+
+# Dependencies — reinstalled inside the image so the platform/ABI is right.
+node_modules
+client/node_modules
+
+# Build output — rebuilt in the builder stage.
+client/dist
+
+# VCS and local state
+.git
+.gitignore
+data
+backups
+
+# Secrets — never bake these into an image layer.
+.env
+.env.*
+!.env.docker.example
+!.env.example
+
+# Noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# Docker/docs files that the app itself never reads
+Dockerfile
+.dockerignore
+docker-compose.yml
+SELF-HOSTING.md

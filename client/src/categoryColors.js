@@ -14,6 +14,7 @@ export const CATEGORY_COLORS = {
   'Education': '#0984e3',
   'Home': '#6c5ce7',
   'Mortgage': '#d63031',
+  'Transfer': '#4b5563',
   'Other': '#636e72',
 };
 
@@ -25,8 +26,11 @@ export const USER_COLORS = {
 export const CATEGORIES = [
   'Groceries', 'Dining Out', 'Transport', 'Utilities', 'Insurance',
   'Entertainment', 'Health', 'Clothing', 'Personal Care', 'Subscriptions',
-  'Gifts', 'Education', 'Home', 'Mortgage', 'Other'
+  'Gifts', 'Education', 'Home', 'Mortgage', 'Transfer', 'Other'
 ];
+
+// Moving money between your own accounts — never counted as spending
+export const NON_SPENDING_CATEGORIES = ['Transfer'];
 
 export function getCategoryColor(category) {
   return CATEGORY_COLORS[category] || '#636e72';

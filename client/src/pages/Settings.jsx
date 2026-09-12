@@ -71,6 +71,38 @@ export default function Settings() {
     } catch (err) { alert(err.message); }
   }
 
+  async function handleRestore(e, mode) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const backup = JSON.parse(await file.text());
+      if (!backup || typeof backup !== 'object') { alert('That file is not a valid backup.'); return; }
+
+      const tables = ['expenses', 'income_entries', 'savings_goals', 'account_balances', 'users'];
+      const counts = tables
+        .filter(t => Array.isArray(backup[t]) && backup[t].length)
+        .map(t => `${backup[t].length} ${t.replace(/_/g, ' ')}`)
+        .join(', ');
+      const dated = backup.exported_at ? new Date(backup.exported_at).toLocaleString('en-AU') : 'unknown date';
+
+      const warning = mode === 'replace'
+        ? `\n\nREPLACE MODE: this deletes all current data first. This cannot be undone.`
+        : `\n\nMerge mode: existing rows are kept, only missing ones are added.`;
+      if (!confirm(`Restore backup from ${dated}?\n\nContains: ${counts || 'no recognisable data'}${warning}`)) return;
+
+      const result = await restoreBackup(backup, mode);
+      const detail = Object.entries(result.counts || {})
+        .filter(([, n]) => n > 0)
+        .map(([t, n]) => `${t}: ${n}`)
+        .join('\n');
+      alert(`${result.message}\n\n${detail || 'No new rows were added.'}`);
+      window.location.reload();
+    } catch (err) {
+      alert('Restore failed: ' + err.message);
+    }
+  }
+
   async function handleSaveProfile(e) {
     e.preventDefault();
     try {
@@ -416,34 +448,43 @@ export default function Settings() {
         <div className="card">
           <div className="card-title"><Database size={14} /> Data Backup & Restore</div>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
-            Download a full JSON backup of all your data, or restore from a previous backup.
+            A backup covers every table — expenses, income, goals and their contributions, balances,
+            offset withdrawals, levers, budgets and learned rules. Use it to move the app to another
+            machine, or as a safety net.
           </p>
-          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
             <button className="btn btn-primary" onClick={async () => {
               try { await downloadBackup(); } catch (err) { alert('Backup failed: ' + err.message); }
             }}>
               <Download size={14} /> Download Backup
             </button>
-            <label className="btn btn-success" style={{ cursor: 'pointer' }}>
-              <Upload size={14} /> Restore from Backup
-              <input type="file" accept=".json" style={{ display: 'none' }} onChange={async (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                try {
-                  const text = await file.text();
-                  const backup = JSON.parse(text);
-                  if (!backup.expenses) { alert('Invalid backup file'); return; }
-                  if (!confirm(`Restore ${backup.expenses.length} expenses from backup dated ${backup.exported_at || 'unknown'}? Existing data will not be overwritten.`)) return;
-                  const result = await restoreBackup(backup);
-                  alert(`Restored ${result.restored} new expenses (${result.total_in_backup} total in backup)`);
-                } catch (err) { alert('Restore failed: ' + err.message); }
-                e.target.value = '';
-              }} />
-            </label>
+            <button className="btn btn-ghost" onClick={async () => {
+              try { await downloadBackup(true); } catch (err) { alert('Backup failed: ' + err.message); }
+            }} title="Includes password hashes so you can log in with the same passwords after restoring">
+              <Download size={14} /> Download with logins
+            </button>
           </div>
-          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '1rem' }}>
-            We recommend downloading a backup regularly to protect against data loss.
-          </p>
+
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: '1rem' }}>
+            <div style={{ fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.5rem' }}>Restore</div>
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <label className="btn btn-success" style={{ cursor: 'pointer' }}>
+                <Upload size={14} /> Merge into existing
+                <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => handleRestore(e, 'merge')} />
+              </label>
+              <label className="btn btn-ghost" style={{ cursor: 'pointer', borderColor: 'var(--red)', color: 'var(--red)' }}>
+                <Upload size={14} /> Replace everything
+                <input type="file" accept=".json" style={{ display: 'none' }} onChange={(e) => handleRestore(e, 'replace')} />
+              </label>
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.75rem' }}>
+              <strong>Merge</strong> adds only rows that aren't already there — safe to run twice.
+              <br />
+              <strong>Replace</strong> deletes current data first. Use this when setting up a fresh
+              install (for example on your own machine) so seeded demo data doesn't get mixed in.
+            </p>
+          </div>
         </div>
       )}
 
