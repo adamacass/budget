@@ -9,7 +9,13 @@
 
 services:
   db:
-    image: postgres:16-alpine
+    # Must be >= the Postgres version you are migrating FROM: pg_dump refuses to
+    # read a server newer than itself. Render currently provisions Postgres 18.
+    # Override with POSTGRES_IMAGE in .env if your source is on something else.
+    #
+    # Changing the major version means deleting the volume and restoring again —
+    # a data directory written by one major version will not start under another.
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-budget}
