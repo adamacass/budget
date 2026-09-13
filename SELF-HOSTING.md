@@ -137,8 +137,23 @@ balance and budget, plus your existing usernames and passwords.
 
 2. Make sure the local stack is up (`docker compose up -d`), then:
 
+   **macOS / Linux:**
+
    ```bash
    ./scripts/migrate-from-render.sh "postgresql://user:password@dpg-xxxxx.oregon-postgres.render.com/dbname"
+   ```
+
+   **Windows (PowerShell)** — the `.sh` script will not run here, use the PowerShell one:
+
+   ```powershell
+   .\scripts\migrate-from-render.ps1 "postgresql://user:password@dpg-xxxxx.oregon-postgres.render.com/dbname"
+   ```
+
+   If PowerShell refuses with "running scripts is disabled on this system", allow local
+   scripts for your user once:
+
+   ```powershell
+   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
    ```
 
    Wrap the URL in quotes — passwords often contain characters your shell would eat.
