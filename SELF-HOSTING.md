@@ -343,15 +343,57 @@ If it doesn't load, the desktop firewall is blocking port 8080 — on Windows, a
 the app is plain HTTP with no rate limiting, so anything you type, including your password,
 crosses the network unencrypted.
 
-To reach it while out of the house, use [Tailscale](https://tailscale.com): install it on
-the desktop and on your phone, both join your private network, and the app is at
-`http://<tailscale-hostname>:8080` from anywhere. Traffic is encrypted, nothing is exposed
-publicly, and the free tier covers a personal setup comfortably.
+## Reaching it from anywhere
 
-**Do not port-forward 8080 on your router.** That publishes an unencrypted login form for
-your entire financial history to the open internet. If you ever genuinely need that, put it
-behind a reverse proxy with a real TLS certificate and rate limiting first — but Tailscale
-is easier and safer.
+Two good options. Both give a fixed address and neither opens a port on your router.
+
+### Option A — Tailscale (private, needs the app on each device)
+
+Install [Tailscale](https://tailscale.com) on the desktop and on your phone, sign in to
+both with the same account, and the app is at `http://<tailscale-hostname>:8080` from
+anywhere. Nothing is exposed publicly — only your own devices can see it.
+
+The catch: every device you want to use needs the Tailscale app and to be signed in. No
+good for a borrowed laptop or sharing a link.
+
+### Option B — Cloudflare Tunnel (a real https:// URL, any browser)
+
+Gives you something like `https://budget.yourdomain.com` that works in any browser with
+nothing installed. Needs a domain on Cloudflare (~$10/year).
+
+1. Add your domain to Cloudflare (free plan is fine).
+2. Zero Trust dashboard → **Networks → Tunnels → Create a tunnel** → name it → copy the
+   **token**.
+3. Put it in `.env` as `TUNNEL_TOKEN=...`
+4. In the tunnel's **Public Hostname** tab, add your hostname (e.g. `budget.yourdomain.com`)
+   pointing at service `http://app:4000`. That's the compose service name — cloudflared
+   reaches it over the private compose network, so port 8080 need not be published at all.
+5. Start it:
+
+   ```bash
+   docker compose --profile tunnel up -d
+   ```
+
+Without `--profile tunnel` the tunnel container never starts, so this stays off until you
+ask for it.
+
+**Then lock it down — this step is not optional.** A tunnel publishes the app to the whole
+internet, where its only defence is its own login form: no rate limiting, no lockout, no
+second factor. Put Cloudflare Access in front of it:
+
+Zero Trust → **Access → Applications → Add an application** → Self-hosted → your hostname →
+add a policy allowing only your and your partner's email addresses, action **Allow**, with
+**One-time PIN** as the identity method.
+
+Visitors then get a Cloudflare login page and a code emailed to them before the app is
+reachable at all. Free for up to 50 users. Without it, anyone who guesses the hostname can
+sit and grind passwords against your financial history.
+
+### Either way, do not port-forward 8080 on your router
+
+That publishes an unencrypted login form for your entire financial history to the open
+internet, with your password crossing the network in the clear. Both options above are
+easier and dramatically safer.
 
 ---
 

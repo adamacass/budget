@@ -72,6 +72,36 @@ services:
       - "${APP_PORT:-8080}:4000"
 
   # ---------------------------------------------------------------------------
+  # Optional: Cloudflare Tunnel — a fixed https:// address reachable from any
+  # browser, with no app to install on your phone and no router ports opened.
+  #
+  # Off by default. Turn it on with:
+  #   docker compose --profile tunnel up -d
+  #
+  # Set TUNNEL_TOKEN in .env first (Cloudflare Zero Trust dashboard ->
+  # Networks -> Tunnels -> Create a tunnel -> copy the token). Point the tunnel's
+  # public hostname at   http://app:4000   — "app" is this compose service, which
+  # cloudflared reaches over the private compose network.
+  #
+  # IMPORTANT: this publishes the app to the public internet. Put Cloudflare
+  # Access in front of it (free, email one-time-pin) so the login page is never
+  # exposed on its own. See SELF-HOSTING.md.
+  # ---------------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    depends_on:
+      - app
+    command: tunnel --no-autoupdate run
+    environment:
+      # Deliberately not a required (:?) variable: Compose interpolates the whole
+      # file before it filters by profile, so demanding it here would break a
+      # plain `docker compose up -d` for anyone not using the tunnel. If it is
+      # empty and you do start this profile, cloudflared exits saying so.
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:-}"
+
+  # ---------------------------------------------------------------------------
   # Optional: a browser-based Postgres client, for poking at the data directly.
   # Uncomment this block, run `docker compose up -d pgadmin`, open
   # http://localhost:5050 and log in with the email/password below. Then add a
