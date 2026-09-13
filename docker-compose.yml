@@ -87,6 +87,26 @@ services:
   # Access in front of it (free, email one-time-pin) so the login page is never
   # exposed on its own. See SELF-HOSTING.md.
   # ---------------------------------------------------------------------------
+  # Quick tunnel — no Cloudflare account, no domain, no signup. Start with:
+  #   docker compose --profile quicktunnel up -d
+  #   docker compose logs quicktunnel | Select-String trycloudflare
+  # and use the https://<random-words>.trycloudflare.com URL it prints.
+  #
+  # The catch: that URL is regenerated every time this container restarts, so it
+  # is not a permanent address. Good for occasional access; use the `tunnel`
+  # profile below if you want a fixed hostname.
+  #
+  # It is public. Anyone with the URL reaches your login page, and a quick tunnel
+  # cannot sit behind Cloudflare Access (that needs an account). The URL is long
+  # and random, but treat it as a secret and stop the tunnel when you're done.
+  quicktunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["quicktunnel"]
+    depends_on:
+      - app
+    command: tunnel --no-autoupdate --url http://app:4000
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped

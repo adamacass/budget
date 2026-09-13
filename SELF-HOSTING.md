@@ -345,7 +345,31 @@ crosses the network unencrypted.
 
 ## Reaching it from anywhere
 
-Two good options. Both give a fixed address and neither opens a port on your router.
+Three options, cheapest first. None of them opens a port on your router.
+
+### Option 0 — Quick tunnel (free, no account, no domain)
+
+```bash
+docker compose --profile quicktunnel up -d
+docker compose logs quicktunnel | grep trycloudflare        # PowerShell: | Select-String trycloudflare
+```
+
+That prints a `https://<random-words>.trycloudflare.com` address that works in any browser
+straight away. Nothing to sign up for.
+
+Two catches:
+
+- **The URL changes every time the container restarts**, including on reboot. Fine for
+  occasional use, no good as a bookmark.
+- **It cannot be protected by Cloudflare Access** (that needs an account), so your app's own
+  login is the only thing guarding it. The URL is long and unguessable, but treat it as a
+  secret, and stop the tunnel when you don't need it:
+
+  ```bash
+  docker compose stop quicktunnel
+  ```
+
+Upgrade to Option B below when you want a permanent address.
 
 ### Option A — Tailscale (private, needs the app on each device)
 
