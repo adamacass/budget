@@ -25,11 +25,22 @@ param(
   [string]$RenderUrl
 )
 
-$ErrorActionPreference = 'Stop'
+# Deliberately NOT 'Stop'. docker compose writes its progress ("Container
+# budget-app-1 Stopping") to stderr, and PowerShell turns native-command stderr
+# into error records — under 'Stop' that aborts the script on a successful
+# command. Failures are detected explicitly via $LASTEXITCODE instead.
+$ErrorActionPreference = 'Continue'
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor White }
 function Info($msg) { Write-Host "    $msg" }
 function Fail($msg) { Write-Host "`nERROR: $msg" -ForegroundColor Red; exit 1 }
+
+# Run docker, swallowing its chatter but preserving the exit code.
+function Invoke-Docker {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$DockerArgs)
+  & docker @DockerArgs 2>&1 | Out-Null
+  return $LASTEXITCODE
+}
 
 # Run from the repo root regardless of where the script was invoked from
 Set-Location (Join-Path $PSScriptRoot '..')
@@ -72,12 +83,12 @@ $LogFile = "backups\restore-$Timestamp.log"
 # --- 1. preflight ----------------------------------------------------------
 
 Step 'Checking the local database is running'
-docker compose version *> $null
-if ($LASTEXITCODE -ne 0) {
+$dcStatus = Invoke-Docker compose version
+if ($dcStatus -ne 0) {
   Fail 'Docker Compose not found. Install Docker Desktop and make sure it is running.'
 }
 
-$running = docker compose ps --services --status running 2>$null
+$running = & docker compose ps --services --status running 2>&1 | Where-Object { $_ -is [string] }
 if ($running -notcontains 'db') {
   Fail @"
 The 'db' service is not running.
@@ -86,8 +97,8 @@ The 'db' service is not running.
 "@
 }
 
-docker compose exec -T db pg_isready -U $PgUser -d $PgDb *> $null
-if ($LASTEXITCODE -ne 0) {
+$readyStatus = Invoke-Docker compose exec -T db pg_isready -U $PgUser -d $PgDb
+if ($readyStatus -ne 0) {
   Fail @"
 The 'db' container is running but Postgres is not accepting connections yet.
        Wait a few seconds and try again, or check:  docker compose logs db
@@ -102,16 +113,16 @@ Info 'This reads from Render and writes nothing to it.'
 
 # Dump to a file inside the container, then copy it out — avoids PowerShell
 # mangling the encoding of a redirected stream.
-docker compose exec -T db pg_dump $RenderUrl --no-owner --no-privileges --clean --if-exists --file /tmp/render-dump.sql
-if ($LASTEXITCODE -ne 0) {
+$dumpStatus = Invoke-Docker compose exec -T db pg_dump $RenderUrl --no-owner --no-privileges --clean --if-exists --file /tmp/render-dump.sql
+if ($dumpStatus -ne 0) {
   Fail @"
 pg_dump failed. Check the connection string, and that the Render database
        still exists (free-tier databases expire and the URL rotates).
 "@
 }
 
-docker compose cp db:/tmp/render-dump.sql $DumpFile
-if ($LASTEXITCODE -ne 0) { Fail 'Could not copy the dump out of the container.' }
+$cpStatus = Invoke-Docker compose cp db:/tmp/render-dump.sql $DumpFile
+if ($cpStatus -ne 0) { Fail 'Could not copy the dump out of the container.' }
 
 if (-not (Test-Path $DumpFile) -or (Get-Item $DumpFile).Length -eq 0) {
   Remove-Item $DumpFile -ErrorAction SilentlyContinue
@@ -123,7 +134,7 @@ Info "Saved $DumpFile ($sizeKb KB)."
 # --- 3. stop the app -------------------------------------------------------
 
 Step 'Stopping the app container while the tables are replaced'
-docker compose stop app *> $null
+Invoke-Docker compose stop app | Out-Null
 Info 'Stopped.'
 
 # --- 4. restore ------------------------------------------------------------
@@ -132,7 +143,8 @@ Step 'Restoring into the local database'
 Info 'DROPs and recreates the tables in the dump, then loads the rows.'
 
 # Restore from a file inside the container for the same encoding reason
-docker compose exec -T db psql -v ON_ERROR_STOP=1 --quiet -U $PgUser -d $PgDb -f /tmp/render-dump.sql *> $LogFile
+& docker compose exec -T db psql -v ON_ERROR_STOP=1 --quiet -U $PgUser -d $PgDb -f /tmp/render-dump.sql 2>&1 |
+  Out-File -FilePath $LogFile -Encoding utf8
 $restoreStatus = $LASTEXITCODE
 
 if ($restoreStatus -ne 0) {
@@ -149,7 +161,7 @@ Info "Restore completed. Log: $LogFile"
 # --- 5. restart and verify -------------------------------------------------
 
 Step 'Starting the app again'
-docker compose start app *> $null
+Invoke-Docker compose start app | Out-Null
 Info 'Started. It re-applies its own idempotent schema migrations on boot;'
 Info 'it will NOT re-seed demo data because the tables now have rows.'
 
@@ -158,7 +170,7 @@ $tables = @('users', 'expenses', 'income_entries', 'account_balances', 'savings_
             'goal_contributions', 'fund_allocations', 'levers', 'category_budgets')
 foreach ($t in $tables) {
   $sql = "SELECT CASE WHEN to_regclass('public.$t') IS NULL THEN 'MISSING' ELSE (SELECT count(*)::text FROM $t) END"
-  $count = docker compose exec -T db psql -At -U $PgUser -d $PgDb -c $sql 2>$null
+  $count = & docker compose exec -T db psql -At -U $PgUser -d $PgDb -c $sql 2>&1 | Where-Object { $_ -is [string] }
   if ($null -eq $count -or $count -eq '') { $count = '?' }
   Write-Host ("    {0,-22} {1}" -f $t, ($count -join ''))
 }
