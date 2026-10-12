@@ -10,6 +10,7 @@ import Budget from './pages/Budget';
 import PayDay from './pages/PayDay';
 import Goals from './pages/Goals';
 import Offset from './pages/Offset';
+import Admin from './pages/Admin';
 import Projections from './pages/Projections';
 import Settings from './pages/Settings';
 import Statements from './pages/Statements';
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="payday" element={<PayDay />} />
         <Route path="goals" element={<Goals />} />
         <Route path="offset" element={<Offset />} />
+        <Route path="admin" element={<Admin />} />
         <Route path="projections" element={<Projections />} />
         <Route path="statements" element={<Statements />} />
         <Route path="settings" element={<Settings />} />

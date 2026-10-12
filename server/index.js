@@ -4,9 +4,13 @@ const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const XLSX = require('xlsx');
+const cron = require('node-cron');
 const { getDb, autoCategorizeTxn, categorizeTxnDetailed, getCategoryRules } = require('./db');
 const { generateToken, authMiddleware } = require('./auth');
-const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = require('./claude');
+const claude = require('./claude');
+const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = claude;
+const telegram = require('./telegram');
+const digest = require('./digest');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -637,17 +641,18 @@ app.post('/api/offset/reset', authMiddleware, asyncHandler(async (req, res) => {
 }));
 
 // Record money taken out of (or put back into) the offset
-app.post('/api/offset/withdraw', authMiddleware, asyncHandler(async (req, res) => {
-  const { amount, withdrawal_date, reason, category, goal_id, deposit } = req.body;
+// Shared by the HTTP endpoint and the Telegram bot so both behave identically.
+async function recordOffsetMovement(db, { userId, amount, withdrawalDate, reason, category, goalId, deposit }) {
   const parsed = parseFloat(String(amount ?? '').replace(/[$,]/g, ''));
   if (!parsed || isNaN(parsed) || parsed <= 0) {
-    return res.status(400).json({ error: 'Provide a valid amount greater than zero' });
+    const err = new Error('Provide a valid amount greater than zero');
+    err.statusCode = 400;
+    throw err;
   }
   // A deposit is stored as a negative withdrawal so one table covers both directions
   const signed = deposit ? -Math.abs(parsed) : Math.abs(parsed);
-  const date = withdrawal_date || new Date().toISOString().split('T')[0];
+  const date = withdrawalDate || new Date().toISOString().split('T')[0];
 
-  const db = await getDb();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -657,35 +662,61 @@ app.post('/api/offset/withdraw', authMiddleware, asyncHandler(async (req, res) =
 
     const inserted = (await client.query(
       'INSERT INTO offset_withdrawals (user_id, amount, withdrawal_date, reason, category, goal_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [req.user.id, signed, date, reason || null, category || 'Other', goal_id || null]
+      [userId, signed, date, reason || null, category || 'Other', goalId || null]
     )).rows[0];
 
     await client.query(
       "INSERT INTO account_balances (account_type, balance, updated_by, note, source) VALUES ('offset', $1, $2, $3, $4)",
-      [newBalance, req.user.id, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal'), deposit ? 'deposit' : 'withdrawal']
+      [newBalance, userId, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal'), deposit ? 'deposit' : 'withdrawal']
     );
 
     // If it came out of a specific goal bucket, draw that bucket down too
-    if (goal_id) {
-      const goal = (await client.query('SELECT current_amount FROM savings_goals WHERE id = $1', [goal_id])).rows[0];
+    if (goalId) {
+      const goal = (await client.query('SELECT current_amount FROM savings_goals WHERE id = $1', [goalId])).rows[0];
       if (goal) {
         const updated = Math.max(0, Math.round(((parseFloat(goal.current_amount) || 0) - signed) * 100) / 100);
-        await client.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2', [updated, goal_id]);
+        await client.query('UPDATE savings_goals SET current_amount = $1 WHERE id = $2', [updated, goalId]);
         await client.query(
           'INSERT INTO goal_contributions (goal_id, user_id, amount, notes) VALUES ($1, $2, $3, $4)',
-          [goal_id, req.user.id, -signed, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal')]
+          [goalId, userId, -signed, reason || (deposit ? 'Offset deposit' : 'Offset withdrawal')]
         );
       }
     }
 
     await client.query('COMMIT');
-    res.json({ withdrawal: inserted, balance: newBalance, previous_balance: previousBalance });
+    return { withdrawal: inserted, balance: newBalance, previous_balance: previousBalance };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();
   }
+}
+
+app.post('/api/offset/withdraw', authMiddleware, asyncHandler(async (req, res) => {
+  const { amount, withdrawal_date, reason, category, goal_id, deposit } = req.body;
+  const db = await getDb();
+  let result;
+  try {
+    result = await recordOffsetMovement(db, {
+      userId: req.user.id,
+      amount, withdrawalDate: withdrawal_date, reason, category, goalId: goal_id, deposit,
+    });
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    throw err;
+  }
+
+  // Tell the household — an offset movement is the thing everyone cares about
+  notifyOffsetMovement(db, {
+    actorId: req.user.id,
+    amount: Math.abs(parseFloat(String(amount).replace(/[$,]/g, ''))),
+    deposit: !!deposit,
+    reason,
+    balance: result.balance,
+  }).catch(() => {});
+
+  res.json(result);
 }));
 
 app.get('/api/offset/withdrawals', authMiddleware, asyncHandler(async (req, res) => {
@@ -3620,6 +3651,199 @@ app.post('/api/quick-add', authMiddleware, asyncHandler(async (req, res) => {
   });
 }));
 
+// ===================== ADMIN / BOT =====================
+
+function randomCode() {
+  // No 0/O/1/I — these get read off a screen and typed into a phone
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 8; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return `${out.slice(0, 4)}-${out.slice(4)}`;
+}
+
+app.get('/api/admin/bot/status', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const links = (await db.query('SELECT COUNT(*) as n FROM telegram_links WHERE active = 1')).rows[0];
+  const schedule = await getBotSetting(db, 'digest_cron', DEFAULT_DIGEST_CRON);
+  res.json({
+    ...telegram.status(),
+    linked_chats: parseInt(links.n) || 0,
+    digest_cron: schedule,
+    digest_enabled: (await getBotSetting(db, 'digest_enabled', '1')) === '1',
+    ai_configured: !!process.env.ANTHROPIC_API_KEY,
+  });
+}));
+
+app.post('/api/admin/bot/link-code', authMiddleware, asyncHandler(async (req, res) => {
+  const userId = parseInt(req.body?.user_id) || req.user.id;
+  const db = await getDb();
+  const code = randomCode();
+  await db.query(
+    "INSERT INTO telegram_link_codes (code, user_id, expires_at) VALUES ($1, $2, NOW() + INTERVAL '30 minutes')",
+    [code, userId]
+  );
+  const user = (await db.query('SELECT display_name FROM users WHERE id = $1', [userId])).rows[0];
+  res.json({ code, user_id: userId, display_name: user?.display_name, expires_in_minutes: 30 });
+}));
+
+app.get('/api/admin/bot/links', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  res.json((await db.query(
+    `SELECT l.id, l.chat_id, l.user_id, l.telegram_username, l.first_name, l.active,
+            l.digest_enabled, l.alerts_enabled, l.linked_at, l.last_seen_at, u.display_name
+     FROM telegram_links l JOIN users u ON l.user_id = u.id ORDER BY l.linked_at DESC`
+  )).rows);
+}));
+
+app.patch('/api/admin/bot/links/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const { digest_enabled, alerts_enabled, active } = req.body || {};
+  const db = await getDb();
+  await db.query(
+    `UPDATE telegram_links SET
+       digest_enabled = COALESCE($1, digest_enabled),
+       alerts_enabled = COALESCE($2, alerts_enabled),
+       active = COALESCE($3, active)
+     WHERE id = $4`,
+    [
+      digest_enabled === undefined ? null : (digest_enabled ? 1 : 0),
+      alerts_enabled === undefined ? null : (alerts_enabled ? 1 : 0),
+      active === undefined ? null : (active ? 1 : 0),
+      req.params.id,
+    ]
+  );
+  res.json({ message: 'Updated' });
+}));
+
+app.delete('/api/admin/bot/links/:id', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  await db.query('DELETE FROM telegram_links WHERE id = $1', [req.params.id]);
+  res.json({ message: 'Unlinked' });
+}));
+
+app.get('/api/admin/bot/activity', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  res.json((await db.query(
+    `SELECT a.*, u.display_name FROM bot_activity a
+     LEFT JOIN users u ON a.user_id = u.id
+     ORDER BY a.id DESC LIMIT $1`, [limit]
+  )).rows);
+}));
+
+app.post('/api/admin/bot/send-digest', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  if (!telegram.isConfigured()) return res.status(400).json({ error: 'Bot token not configured' });
+  const sent = await sendDigestNow(db);
+  res.json({ message: `Digest sent to ${sent} chat${sent === 1 ? '' : 's'}`, sent });
+}));
+
+app.put('/api/admin/bot/digest-settings', authMiddleware, asyncHandler(async (req, res) => {
+  const { digest_cron, digest_enabled } = req.body || {};
+  const db = await getDb();
+  if (digest_cron !== undefined) {
+    if (!cron.validate(digest_cron)) return res.status(400).json({ error: 'That is not a valid cron expression' });
+    await setBotSetting(db, 'digest_cron', digest_cron);
+  }
+  if (digest_enabled !== undefined) {
+    await setBotSetting(db, 'digest_enabled', digest_enabled ? '1' : '0');
+  }
+  await rescheduleDigest();
+  res.json({ message: 'Saved', digest_cron: await getBotSetting(db, 'digest_cron', DEFAULT_DIGEST_CRON) });
+}));
+
+// System health for the admin UI
+app.get('/api/admin/system', authMiddleware, asyncHandler(async (req, res) => {
+  const db = await getDb();
+  const counts = {};
+  for (const t of ['users', 'expenses', 'income_entries', 'account_balances', 'savings_goals',
+                   'offset_withdrawals', 'planned_withdrawals', 'telegram_links']) {
+    try {
+      counts[t] = parseInt((await db.query(`SELECT COUNT(*) as n FROM ${t}`)).rows[0].n);
+    } catch { counts[t] = null; }
+  }
+  const dbSize = (await db.query('SELECT pg_size_pretty(pg_database_size(current_database())) as size')).rows[0]?.size;
+  const pgVersion = (await db.query('SHOW server_version')).rows[0]?.server_version;
+  const latest = (await db.query('SELECT MAX(expense_date) as d FROM expenses')).rows[0]?.d;
+
+  res.json({
+    version: pkg.version,
+    node: process.version,
+    postgres: pgVersion,
+    database_size: dbSize,
+    uptime_seconds: Math.round(process.uptime()),
+    started_at: SERVER_START_TIME,
+    ai_configured: !!process.env.ANTHROPIC_API_KEY,
+    counts,
+    latest_expense_date: latest,
+  });
+}));
+
+// --- bot settings helpers ---
+
+const DEFAULT_DIGEST_CRON = '0 8 * * *';
+
+async function getBotSetting(db, key, fallback) {
+  try {
+    const row = (await db.query('SELECT value FROM bot_settings WHERE key = $1', [key])).rows[0];
+    return row ? row.value : fallback;
+  } catch { return fallback; }
+}
+
+async function setBotSetting(db, key, value) {
+  await db.query(
+    `INSERT INTO bot_settings (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, String(value)]
+  );
+}
+
+async function sendDigestNow(db) {
+  const mc = await getMortgageConfig(db);
+  const text = await digest.buildDailyDigest(db, { mortgageConfig: mc, nonSpending: NON_SPENDING_CATEGORIES });
+  return telegram.broadcast(db, text, { kind: 'digest', respectDigestFlag: true });
+}
+
+// Push an offset movement out to the linked chats
+async function notifyOffsetMovement(db, { actorId, amount, deposit, reason, balance }) {
+  if (!telegram.isConfigured()) return;
+  const actor = (await db.query('SELECT display_name FROM users WHERE id = $1', [actorId])).rows[0];
+  const mc = await getMortgageConfig(db);
+  const interest = balance * (mc.rate / 12);
+  const text =
+    `${deposit ? '⬆️' : '⬇️'} <b>${actor?.display_name || 'Someone'}</b> ` +
+    `${deposit ? 'put' : 'took'} <b>${digest.fmt2(amount)}</b> ${deposit ? 'into' : 'out of'} the offset` +
+    `${reason ? ` — ${reason}` : ''}\n\n` +
+    `Offset now <b>${digest.fmt(balance)}</b>, saving ${digest.fmt(interest)}/mo in interest.`;
+  await telegram.broadcast(db, text, { kind: 'offset_alert' });
+}
+
+let digestTask = null;
+
+async function rescheduleDigest() {
+  if (digestTask) { digestTask.stop(); digestTask = null; }
+  if (!telegram.isConfigured()) return;
+
+  const db = await getDb();
+  const enabled = (await getBotSetting(db, 'digest_enabled', '1')) === '1';
+  if (!enabled) { console.log('[digest] disabled'); return; }
+
+  const expr = await getBotSetting(db, 'digest_cron', DEFAULT_DIGEST_CRON);
+  if (!cron.validate(expr)) {
+    console.error(`[digest] invalid cron "${expr}" — not scheduling`);
+    return;
+  }
+  digestTask = cron.schedule(expr, async () => {
+    try {
+      const d = await getDb();
+      const sent = await sendDigestNow(d);
+      console.log(`[digest] sent to ${sent} chat(s)`);
+    } catch (err) {
+      console.error('[digest] failed:', err.message);
+    }
+  });
+  console.log(`[digest] scheduled "${expr}"`);
+}
+
 // SPA fallback
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
@@ -3635,4 +3859,26 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Budget server running on port ${PORT}`);
+
+  // Start the Telegram bot once the DB is reachable. Long polling means Telegram
+  // never has to reach us, so this works on a home machine behind NAT.
+  getDb()
+    .then(async () => {
+      const started = await telegram.start({
+        getDb,
+        digest,
+        claude,
+        getMortgageConfig,
+        getCategoryRules,
+        categorize: categorizeTxnDetailed,
+        parseDate: parseStatementDate,
+        nonSpending: NON_SPENDING_CATEGORIES,
+        recordOffsetMovement,
+      });
+      if (started) await rescheduleDigest();
+    })
+    .catch(err => console.error('[telegram] startup failed:', err.message));
 });
+
+process.on('SIGTERM', () => { telegram.stop(); process.exit(0); });
+process.on('SIGINT', () => { telegram.stop(); process.exit(0); });

@@ -193,6 +193,17 @@ export const exportForAI = async (params = {}) => {
   URL.revokeObjectURL(url);
 };
 
+// Admin / Telegram bot
+export const getBotStatus = () => apiFetch('/api/admin/bot/status');
+export const createLinkCode = (user_id) => apiFetch('/api/admin/bot/link-code', { method: 'POST', body: JSON.stringify({ user_id }) });
+export const getBotLinks = () => apiFetch('/api/admin/bot/links');
+export const updateBotLink = (id, data) => apiFetch(`/api/admin/bot/links/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+export const deleteBotLink = (id) => apiFetch(`/api/admin/bot/links/${id}`, { method: 'DELETE' });
+export const getBotActivity = (limit = 50) => apiFetch(`/api/admin/bot/activity?limit=${limit}`);
+export const sendDigestNow = () => apiFetch('/api/admin/bot/send-digest', { method: 'POST' });
+export const updateDigestSettings = (data) => apiFetch('/api/admin/bot/digest-settings', { method: 'PUT', body: JSON.stringify(data) });
+export const getSystemInfo = () => apiFetch('/api/admin/system');
+
 // Export
 export const exportToExcel = async (params = {}) => {
   const qs = new URLSearchParams(params).toString();

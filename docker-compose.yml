@@ -67,6 +67,13 @@ services:
       # Optional. Without it the AI features return a "not configured" message
       # instead of advice; everything else works normally.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional. Set it and the Telegram bot starts with the app. It reaches
+      # Telegram by long polling, so nothing needs to reach your machine — no
+      # public URL, no port forwarding, no tunnel.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # Timezone for the daily digest schedule. Without it the container runs UTC
+      # and your 8am digest arrives at the wrong hour.
+      TZ: ${TZ:-Australia/Sydney}
     ports:
       # host:container — change APP_PORT in .env if 8080 is taken.
       - "${APP_PORT:-8080}:4000"

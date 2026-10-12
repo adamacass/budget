@@ -23,14 +23,18 @@ const pool = new Pool({
   ssl: shouldUseSsl(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : false,
 });
 
-let initialized = false;
+// Memoised so concurrent callers share one initialisation. Without this, two
+// callers racing on a cold start both run initSchema() and collide on
+// CREATE TABLE ("duplicate key value violates unique constraint pg_type_...").
+let initPromise = null;
 
 async function getDb() {
-  if (!initialized) {
-    await initSchema();
-    initialized = true;
-    console.log('PostgreSQL database initialized');
+  if (!initPromise) {
+    initPromise = initSchema()
+      .then(() => { console.log('PostgreSQL database initialized'); })
+      .catch(err => { initPromise = null; throw err; }); // let a failed init be retried
   }
+  await initPromise;
   return pool;
 }
 
@@ -207,6 +211,49 @@ async function initSchema() {
       recurring INTEGER NOT NULL DEFAULT 0,
       recurring_months INTEGER,
       created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Telegram chats linked to app users. A chat must be linked before the bot
+    -- will act on anything it sends.
+    CREATE TABLE IF NOT EXISTS telegram_links (
+      id SERIAL PRIMARY KEY,
+      chat_id TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      telegram_username TEXT,
+      first_name TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      digest_enabled INTEGER NOT NULL DEFAULT 1,
+      alerts_enabled INTEGER NOT NULL DEFAULT 1,
+      linked_at TIMESTAMPTZ DEFAULT NOW(),
+      last_seen_at TIMESTAMPTZ
+    );
+
+    -- Single-use codes that bind a Telegram chat to an app user
+    CREATE TABLE IF NOT EXISTS telegram_link_codes (
+      id SERIAL PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- What the bot did, for the admin UI
+    CREATE TABLE IF NOT EXISTS bot_activity (
+      id SERIAL PRIMARY KEY,
+      chat_id TEXT,
+      user_id INTEGER REFERENCES users(id),
+      direction TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      summary TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Bot/digest configuration that shouldn't live in env vars
+    CREATE TABLE IF NOT EXISTS bot_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     -- Planned future withdrawals, used by projections (not yet actually taken out)

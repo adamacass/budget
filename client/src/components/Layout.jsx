@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Settings, Download, CreditCard, PiggyBank, Sun, Moon, Landmark } from 'lucide-react';
+import { LayoutDashboard, Receipt, Wallet, Target, TrendingUp, Settings, Download, CreditCard, PiggyBank, Sun, Moon, Landmark, Server } from 'lucide-react';
 import { exportToExcel } from '../api';
 
 const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null;
@@ -32,6 +32,7 @@ const navGroups = [
     items: [
       { to: '/statements', icon: CreditCard, label: 'Import' },
       { to: '/settings', icon: Settings, label: 'Settings' },
+      { to: '/admin', icon: Server, label: 'Admin' },
     ],
   },
 ];

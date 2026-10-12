@@ -343,6 +343,60 @@ If it doesn't load, the desktop firewall is blocking port 8080 — on Windows, a
 the app is plain HTTP with no rate limiting, so anything you type, including your password,
 crosses the network unencrypted.
 
+## The Telegram bot
+
+Lets you both log expenses from your phones without opening the app, and sends a
+daily offset update. It works on a home machine because the bot *polls* Telegram —
+Telegram never connects to you, so there's no public URL, port forward or tunnel involved.
+
+**Set it up:**
+
+1. In Telegram, message **@BotFather** → `/newbot` → pick a name and a username → copy the token.
+2. Put it in `.env` as `TELEGRAM_BOT_TOKEN=...`, then:
+
+   ```bash
+   docker compose up -d        # NOT "restart" — that reuses the old environment
+   ```
+
+3. In the app, go to **Admin → Connect a phone**, pick the household member, and
+   generate a link code.
+4. In Telegram, open your new bot and send `/link YOUR-CODE`.
+
+Repeat steps 3–4 for each person. Until a chat is linked the bot ignores it, so finding
+the bot is not enough to use it.
+
+**What it does:**
+
+| You send | It does |
+|---|---|
+| `42.50 woolies` | Logs the expense, auto-categorised |
+| a screenshot of your banking app | Reads the transactions, categorises them, asks before saving |
+| `/offset` | Balance, buckets, interest saved, payoff date |
+| `/today` `/week` `/month` | Spending summaries |
+| `/withdraw 2500 new tyres` | Records money out of the offset |
+| `/deposit 500 refund` | Records money in |
+| `/undo` | Removes the last thing it added |
+| `/digest` | The full daily update, now |
+| `/mute` `/unmute` | Turns the daily digest off and on |
+
+Screenshot reading needs `ANTHROPIC_API_KEY`. Everything else works without it.
+
+When one of you logs something, the other's chat gets a short note — that's what keeps
+the household in sync. Turn it off per person in **Admin → Connected chats**.
+
+**The daily digest** goes out at 8am by default, covering the offset balance and interest
+saved, what moved through the offset over 30 days, spending over 1/7/30 days with the
+week-on-week direction, and the projected payoff date. Change the time in
+**Admin → Daily digest**. Set `TZ` in `.env` or the container runs on UTC and it arrives
+at the wrong hour.
+
+**Security.** The token is a password — anyone holding it controls the bot. It only ever
+lives in `.env` (git-ignored). Linking is by single-use code that expires in 30 minutes,
+so someone finding your bot cannot do anything with it. Revoke a device any time under
+**Admin → Connected chats**, or revoke the token itself via @BotFather.
+
+---
+
 ## Reaching it from anywhere
 
 Three options, cheapest first. None of them opens a port on your router.
