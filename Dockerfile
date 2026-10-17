@@ -54,6 +54,12 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+# Fonts for the daily digest card (server/digest-card.js renders an SVG to PNG,
+# and the slim image ships no fonts at all)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-inter fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
 # The root package.json has no devDependencies at all, so the builder's
 # node_modules is already exactly the production set. Copying it (rather than
 # re-running `npm ci --omit=dev`) means the runtime image needs no compiler,

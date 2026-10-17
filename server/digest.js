@@ -19,8 +19,10 @@ function signed(n) {
 function pct(n) {
   return (Number(n) || 0).toFixed(2).replace(/\.?0+$/, '') + '%';
 }
+// A local (TZ, normally Australia/Sydney) date, not UTC: at 8am in Sydney it is
+// still the previous day in UTC, which would shift "yesterday" back a day
 function daysAgo(n) {
-  return new Date(Date.now() - n * DAY).toISOString().split('T')[0];
+  return new Date(Date.now() - n * DAY).toLocaleDateString('en-CA', { timeZone: process.env.TZ || 'Australia/Sydney' });
 }
 
 // Current offset position plus what it's saving in interest
@@ -149,7 +151,8 @@ async function measuredMonthlySaving(db) {
 // Public builders — each returns a plain string for Telegram (HTML parse mode)
 // ---------------------------------------------------------------------------
 
-async function buildDailyDigest(db, { mortgageConfig, nonSpending }) {
+// Every number the daily update shows, for both the text and the image card
+async function buildDigestData(db, { mortgageConfig, nonSpending }) {
   const snap = await offsetSnapshot(db, mortgageConfig);
   const yesterday = daysAgo(1);
   const weekAgo = daysAgo(7);
@@ -168,6 +171,98 @@ async function buildDailyDigest(db, { mortgageConfig, nonSpending }) {
     [daysAgo(14), weekAgo, nonSpending]
   )).rows[0]?.t) || 0;
   const weekDelta = prevWeek > 0 ? ((weekSpend.total - prevWeek) / prevWeek) * 100 : 0;
+
+  // Spending per day for the last 7 full days (up to yesterday), oldest first,
+  // zero-filled; the update goes out in the morning, when today is still empty
+  const byDay = new Map((await db.query(
+    `SELECT expense_date AS d, SUM(amount) AS t FROM expenses
+     WHERE expense_date >= $1 AND expense_date < $2 AND NOT (category = ANY($3)) GROUP BY expense_date`,
+    [daysAgo(7), daysAgo(0), nonSpending]
+  )).rows.map(r => [r.d, parseFloat(r.t) || 0]));
+  const daily = [];
+  for (let i = 7; i >= 1; i--) {
+    const d = daysAgo(i);
+    daily.push({ date: d, total: byDay.get(d) || 0 });
+  }
+
+  const byPerson = await spendingByPerson(db, daysAgo(7), daysAgo(0), nonSpending);
+
+  return { snap, daySpend, weekSpend, monthSpend, flow, saving, proj, prevWeek, weekDelta, daily, byPerson };
+}
+
+// Each person's spending by category between two dates (from inclusive, to exclusive)
+async function spendingByPerson(db, from, to, nonSpending) {
+  const rows = (await db.query(
+    `SELECT u.id, u.display_name, e.category, SUM(e.amount) AS total, COUNT(*) AS n
+     FROM users u LEFT JOIN expenses e ON e.user_id = u.id
+       AND e.expense_date >= $1 AND e.expense_date < $2 AND NOT (e.category = ANY($3))
+     GROUP BY u.id, u.display_name, e.category
+     ORDER BY u.id, SUM(e.amount) DESC NULLS LAST`,
+    [from, to, nonSpending]
+  )).rows;
+  const people = new Map();
+  for (const r of rows) {
+    if (!people.has(r.id)) people.set(r.id, { name: r.display_name, total: 0, categories: [] });
+    if (!r.category) continue;
+    const p = people.get(r.id);
+    const total = parseFloat(r.total) || 0;
+    p.total += total;
+    p.categories.push({ category: r.category, total, count: parseInt(r.n) });
+  }
+  return { from, to, people: [...people.values()] };
+}
+
+function shortDay(iso) {
+  return new Date(iso + 'T00:00:00').toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+// "This week by person": every category each person spent on, biggest first
+function personWeekLines(byPerson) {
+  const last = daysAgoFrom(byPerson.to, 1);
+  const lines = [`<b>This week by person</b>  <i>${shortDay(byPerson.from)} – ${shortDay(last)}</i>`];
+  for (const p of byPerson.people) {
+    lines.push('');
+    lines.push(`<b>${p.name}</b>  ${fmt(p.total)}`);
+    if (!p.categories.length) { lines.push('   nothing logged'); continue; }
+    for (const c of p.categories) lines.push(`   ${c.category}  ${fmt(c.total)}`);
+  }
+  return lines;
+}
+
+function daysAgoFrom(iso, n) {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().split('T')[0];
+}
+
+// The caption under the daily card. The card carries the offset and payoff
+// figures, so the text adds what the picture doesn't: who spent what.
+function buildDigestCaption(data) {
+  const { snap, flow } = data;
+  const lines = [
+    `💰 <b>${fmt(snap.balance)}</b> in the offset  ·  ${flow.net >= 0 ? '▲ up' : '▼ down'} ${fmt(Math.abs(flow.net))} over 30 days`,
+    '',
+    ...personWeekLines(data.byPerson),
+  ];
+  return lines.join('\n');
+}
+
+async function buildWeekByPerson(db, { nonSpending }) {
+  const byPerson = await spendingByPerson(db, daysAgo(7), daysAgo(0), nonSpending);
+  const today = await spendingByPerson(db, daysAgo(0), daysAgo(-1), nonSpending);
+  const lines = personWeekLines(byPerson);
+  const todayTotal = today.people.reduce((s, p) => s + p.total, 0);
+  if (todayTotal > 0) {
+    lines.push('');
+    lines.push(`<i>Plus ${fmt(todayTotal)} so far today: ${today.people.filter(p => p.total > 0).map(p => `${p.name} ${fmt(p.total)}`).join(', ')}</i>`);
+  }
+  return lines.join('\n');
+}
+
+// The full update as text: sent on its own when the card can't be drawn
+async function buildDailyDigest(db, { mortgageConfig, nonSpending, data }) {
+  const d = data || await buildDigestData(db, { mortgageConfig, nonSpending });
+  const { snap, daySpend, weekSpend, monthSpend, flow, saving, proj, prevWeek, weekDelta } = d;
 
   const lines = [];
   lines.push('<b>Offset update</b>');
@@ -207,6 +302,9 @@ async function buildDailyDigest(db, { mortgageConfig, nonSpending }) {
       : `${proj.rem_months_saved}mo`;
     lines.push(`   ${t} earlier than scheduled`);
   }
+
+  lines.push('');
+  lines.push(...personWeekLines(d.byPerson));
 
   return lines.join('\n');
 }
@@ -260,6 +358,9 @@ async function buildSpendSummary(db, days, { nonSpending }) {
 }
 
 module.exports = {
+  buildDigestData,
+  buildDigestCaption,
+  buildWeekByPerson,
   buildDailyDigest,
   buildOffsetSummary,
   buildSpendSummary,

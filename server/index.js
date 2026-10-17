@@ -12,6 +12,7 @@ const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransa
 const telegram = require('./telegram');
 const digest = require('./digest');
 const { categorizeBatch } = require('./categorize');
+const { householdNotify } = require('./household-notify');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -65,6 +66,8 @@ async function getMortgageConfig(db) {
 
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
+// Tell the other person when one of you adds spending or money (server/household-notify.js)
+app.use(householdNotify({ getDb, telegram }));
 
 // Serve static frontend in production
 if (process.env.NODE_ENV === 'production') {
@@ -3800,9 +3803,36 @@ async function setBotSetting(db, key, value) {
 }
 
 async function sendDigestNow(db) {
-  const mc = await getMortgageConfig(db);
-  const text = await digest.buildDailyDigest(db, { mortgageConfig: mc, nonSpending: NON_SPENDING_CATEGORIES });
-  return telegram.broadcast(db, text, { kind: 'digest', respectDigestFlag: true });
+  const sent = await telegram.broadcastDigest(db);
+  await setBotSetting(db, 'digest_last_sent', sydneyDate());
+  return sent;
+}
+
+function sydneyDate(d = new Date()) {
+  return d.toLocaleDateString('en-CA', { timeZone: process.env.TZ || 'Australia/Sydney' });
+}
+
+// The cron job only fires if the app is running at that minute. If the PC was
+// asleep or Docker was restarting, send the missed update as soon as we're back,
+// once per day. Only simple daily expressions ("M H * * *") can be checked.
+async function sendDigestIfMissed() {
+  if (!telegram.isConfigured()) return;
+  const db = await getDb();
+  if ((await getBotSetting(db, 'digest_enabled', '1')) !== '1') return;
+  const expr = await getBotSetting(db, 'digest_cron', DEFAULT_DIGEST_CRON);
+  const m = String(expr).trim().match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/);
+  if (!m) return;
+
+  const today = sydneyDate();
+  if ((await getBotSetting(db, 'digest_last_sent', '')) === today) return;
+  const now = new Date();
+  const scheduled = parseInt(m[2]) * 60 + parseInt(m[1]);
+  if (now.getHours() * 60 + now.getMinutes() < scheduled) return;
+  // Past midday a "morning" update is stale; wait for tomorrow's
+  if (now.getHours() >= 12 && scheduled < 12 * 60) return;
+
+  const sent = await sendDigestNow(db);
+  console.log(`[digest] caught up a missed update: sent to ${sent} chat(s)`);
 }
 
 // Push an offset movement out to the linked chats
@@ -3816,7 +3846,8 @@ async function notifyOffsetMovement(db, { actorId, amount, deposit, reason, bala
     `${deposit ? 'put' : 'took'} <b>${digest.fmt2(amount)}</b> ${deposit ? 'into' : 'out of'} the offset` +
     `${reason ? ` — ${reason}` : ''}\n\n` +
     `Offset now <b>${digest.fmt(balance)}</b>, saving ${digest.fmt(interest)}/mo in interest.`;
-  await telegram.broadcast(db, text, { kind: 'offset_alert' });
+  // The person who made the change already sees it in the app
+  await telegram.notifyHousehold(db, actorId, text);
 }
 
 let digestTask = null;
@@ -3877,7 +3908,13 @@ app.listen(PORT, () => {
         nonSpending: NON_SPENDING_CATEGORIES,
         recordOffsetMovement,
       });
-      if (started) await rescheduleDigest();
+      if (started) {
+        await rescheduleDigest();
+        // Catch a missed update now, then keep checking (covers waking from sleep)
+        const catchUp = () => sendDigestIfMissed().catch(err => console.error('[digest] catch-up failed:', err.message));
+        catchUp();
+        setInterval(catchUp, 10 * 60 * 1000);
+      }
     })
     .catch(err => console.error('[telegram] startup failed:', err.message));
 });

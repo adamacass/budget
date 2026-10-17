@@ -405,14 +405,27 @@ Where Claude is unsure but a built-in merchant pattern is confident (e.g. "BPAY 
 mortgage), the pattern wins. Without an API key, or if the call fails, the built-in
 patterns are used alone. Guesses are flagged ⚠️ so you can check them.
 
-When one of you logs something, the other's chat gets a short note — that's what keeps
-the household in sync. Turn it off per person in **Admin → Connected chats**.
+When one of you adds spending or money, the other's chat gets a short note — that's what
+keeps the household in sync. It covers the bot (expenses, screenshots, `/deposit`,
+`/withdraw`) and the app: expenses, quick-add, statement and screenshot imports, pay days,
+income, offset withdrawals, deposits and balance resets, account balances, allocations,
+buckets, upcoming expenses, planned withdrawals and backup restores. An import is one
+note, not one per row, and the person who made the change isn't messaged. Turn it off per
+person in **Admin → Connected chats** (alerts). The logic is in `server/household-notify.js`.
 
 **The daily digest** goes out at 8am by default, covering the offset balance and interest
 saved, what moved through the offset over 30 days, spending over 1/7/30 days with the
-week-on-week direction, and the projected payoff date. Change the time in
-**Admin → Daily digest**. Set `TZ` in `.env` or the container runs on UTC and it arrives
-at the wrong hour.
+week-on-week direction, and the projected payoff date. Each person gets an image card
+(greeted by name, with the corgi happy or worried depending on whether the offset grew)
+with each person's spending this week by category as its caption, sent as a normal
+notification. Four buttons stay under the message box in every chat: 📊 Daily update
+(the card, on demand), 🧾 This week (spending by person and category), 💰 Offset and
+❓ Help. The same commands are in the "/" menu.
+Change the time in **Admin → Daily digest**. Set `TZ` in `.env` or the container runs on
+UTC and it arrives at the wrong hour.
+
+If the app wasn't running at that time (the PC was asleep, Docker was restarting), the
+missed update goes out as soon as it's back, once per day, as long as that's before midday.
 
 **Security.** The token is a password — anyone holding it controls the bot. It only ever
 lives in `.env` (git-ignored). Linking is by single-use code that expires in 30 minutes,

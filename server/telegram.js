@@ -9,6 +9,7 @@
 
 const { askBudget } = require('./ask');
 const screenshots = require('./screenshots');
+const digestCard = require('./digest-card');
 
 // Overridable so the bot loop can be exercised against a stub in tests.
 const API = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -77,6 +78,96 @@ async function sendMessage(chatId, text, extra = {}) {
   }, { timeoutMs: 20000 });
 }
 
+// The buttons that sit under the message box in every linked chat. Tapping one
+// sends its label as a message, which handleMessage maps to the command.
+const BUTTONS = {
+  '📊 Daily update': '/digest',
+  '🧾 This week': '/week',
+  '💰 Offset': '/offset',
+  '❓ Help': '/help',
+};
+const KEYBOARD = {
+  keyboard: [
+    [{ text: '📊 Daily update' }, { text: '🧾 This week' }],
+    [{ text: '💰 Offset' }, { text: '❓ Help' }],
+  ],
+  is_persistent: true,
+  resize_keyboard: true,
+};
+
+// Upload a PNG (a Buffer) as a photo. Multipart, since JSON can't carry the file.
+async function sendPhoto(chatId, png, { caption, disableNotification = false, replyMarkup } = {}) {
+  const t = token();
+  if (!t) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('photo', new Blob([png], { type: 'image/png' }), 'update.png');
+  if (caption) { form.append('caption', caption); form.append('parse_mode', 'HTML'); }
+  form.append('disable_notification', String(!!disableNotification));
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${API}/bot${t}/sendPhoto`, { method: 'POST', body: form, signal: controller.signal });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) throw new Error(json.description || `Telegram sendPhoto failed (${res.status})`);
+    return json.result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Telegram caps photo captions at 1024 characters (after HTML is parsed)
+const CAPTION_LIMIT = 1000;
+
+async function buildUpdate(db) {
+  const { getMortgageConfig, nonSpending } = deps;
+  const mortgageConfig = await getMortgageConfig(db);
+  const data = await digest.buildDigestData(db, { mortgageConfig, nonSpending });
+  return {
+    data,
+    caption: digest.buildDigestCaption(data),
+    fallback: await digest.buildDailyDigest(db, { mortgageConfig, nonSpending, data }),
+  };
+}
+
+// One chat's daily update: the card greeting them by name, with who-spent-what
+// as the caption, sent with sound so it shows as a notification. The buttons
+// ride along so they're always under the message box. If the card can't be
+// drawn, the full text update goes instead.
+async function sendUpdate(chatId, name, update) {
+  let png = null;
+  try { png = digestCard.renderCardPng(update.data, { name }); } catch (err) {
+    console.error(`[digest] card failed, sending text only: ${err.message}`);
+  }
+  if (!png) return sendMessage(chatId, update.fallback, { reply_markup: KEYBOARD });
+  if (update.caption.replace(/<[^>]+>/g, '').length <= CAPTION_LIMIT) {
+    return sendPhoto(chatId, png, { caption: update.caption, replyMarkup: KEYBOARD });
+  }
+  await sendPhoto(chatId, png, { replyMarkup: KEYBOARD });
+  return sendMessage(chatId, update.caption, { disable_notification: true });
+}
+
+async function broadcastDigest(db) {
+  const chats = (await db.query(
+    `SELECT l.chat_id, l.user_id, u.display_name FROM telegram_links l
+     JOIN users u ON u.id = l.user_id WHERE l.active = 1 AND l.digest_enabled = 1`
+  )).rows;
+  if (!chats.length) return 0;
+  const update = await buildUpdate(db);
+  let sent = 0;
+  for (const c of chats) {
+    try {
+      await sendUpdate(c.chat_id, c.display_name, update);
+      await logActivity(db, { chatId: c.chat_id, userId: c.user_id, direction: 'out', kind: 'digest', summary: update.caption.slice(0, 120) });
+      sent++;
+    } catch (err) {
+      console.error(`[telegram] digest to ${c.chat_id} failed: ${err.message}`);
+    }
+  }
+  return sent;
+}
 async function logActivity(db, { chatId, userId, direction, kind, summary }) {
   try {
     await db.query(
@@ -146,10 +237,12 @@ const HELP = [
   '   <code>how much did we spend on takeaway this month?</code>',
   '   <code>are we on track for the holiday bucket?</code>',
   '',
+  '<b>Buttons</b> under the message box: 📊 daily update, 🧾 this week, 💰 offset, ❓ help.',
+  '',
   '<b>Commands</b>',
   '/offset — balance, buckets, payoff date',
   '/today — today\'s spending',
-  '/week — last 7 days',
+  '/week — last 7 days, by person and category',
   '/month — last 30 days',
   '/digest — the full daily update now',
   '/withdraw 500 new tyres — record money out of the offset',
@@ -169,7 +262,7 @@ async function handleCommand(db, link, chatId, text) {
   switch (cmd) {
     case '/start':
     case '/help':
-      return sendMessage(chatId, HELP);
+      return sendMessage(chatId, HELP, { reply_markup: KEYBOARD });
 
     case '/offset': {
       const mc = await getMortgageConfig(db);
@@ -179,14 +272,12 @@ async function handleCommand(db, link, chatId, text) {
     case '/today':
       return sendMessage(chatId, await digest.buildSpendSummary(db, 1, { nonSpending }));
     case '/week':
-      return sendMessage(chatId, await digest.buildSpendSummary(db, 7, { nonSpending }));
+      return sendMessage(chatId, await digest.buildWeekByPerson(db, { nonSpending }));
     case '/month':
       return sendMessage(chatId, await digest.buildSpendSummary(db, 30, { nonSpending }));
 
-    case '/digest': {
-      const mc = await getMortgageConfig(db);
-      return sendMessage(chatId, await digest.buildDailyDigest(db, { mortgageConfig: mc, nonSpending }));
-    }
+    case '/digest':
+      return sendUpdate(chatId, link.display_name, await buildUpdate(db));
 
     case '/withdraw':
     case '/deposit': {
@@ -205,9 +296,13 @@ async function handleCommand(db, link, chatId, text) {
         chatId, userId: link.user_id, direction: 'in', kind: isDeposit ? 'deposit' : 'withdrawal',
         summary: `${digest.fmt2(parsed.amount)} ${parsed.description}`,
       });
-      return sendMessage(chatId,
+      await sendMessage(chatId,
         `${isDeposit ? '⬆️ Deposit' : '⬇️ Withdrawal'} of <b>${digest.fmt2(parsed.amount)}</b> recorded.\n` +
         `Offset is now <b>${digest.fmt(result.balance)}</b>.`);
+      const why = parsed.description === 'Expense' ? '' : ` — ${parsed.description.replace(/[<>&]/g, '')}`;
+      return notifyOthers(db, chatId,
+        `${isDeposit ? '⬆️' : '⬇️'} <b>${link.display_name}</b> ${isDeposit ? 'put' : 'took'} <b>${digest.fmt2(parsed.amount)}</b> ` +
+        `${isDeposit ? 'into' : 'out of'} the offset${why}. Offset now <b>${digest.fmt(result.balance)}</b>.`);
     }
 
     case '/undo': {
@@ -268,7 +363,7 @@ async function handleLinking(db, chatId, text, from) {
   );
   await logActivity(db, { chatId, userId: row.user_id, direction: 'in', kind: 'link', summary: `Linked to ${row.display_name}` });
 
-  return sendMessage(chatId, `✅ Linked to <b>${row.display_name}</b>.\n\n${HELP}`);
+  return sendMessage(chatId, `✅ Linked to <b>${row.display_name}</b>.\n\n${HELP}`, { reply_markup: KEYBOARD });
 }
 
 // Save / Discard on a screenshot batch (the batch logic lives in screenshots.js)
@@ -314,15 +409,28 @@ async function handleQuestion(db, link, chatId, text) {
   return sendMessage(chatId, answer.text);
 }
 
-// Tell the *other* linked chats about something, so the household stays in sync
-async function notifyOthers(db, originChatId, text) {
+// Tell everyone except the person who did something, so the household stays in
+// sync. Goes to each of the other people's linked chats (with alerts on).
+async function notifyHousehold(db, actorUserId, text) {
   const others = (await db.query(
-    'SELECT chat_id FROM telegram_links WHERE active = 1 AND alerts_enabled = 1 AND chat_id <> $1',
-    [String(originChatId)]
+    'SELECT chat_id, user_id FROM telegram_links WHERE active = 1 AND alerts_enabled = 1 AND user_id <> $1',
+    [actorUserId]
   )).rows;
   for (const o of others) {
-    await sendMessage(o.chat_id, text).catch(() => {});
+    try {
+      await sendMessage(o.chat_id, text);
+      await logActivity(db, { chatId: o.chat_id, userId: o.user_id, direction: 'out', kind: 'household_alert', summary: text.slice(0, 200) });
+    } catch (err) {
+      console.error(`[telegram] alert to ${o.chat_id} failed: ${err.message}`);
+    }
   }
+}
+
+// The same, starting from the chat the change came from
+async function notifyOthers(db, originChatId, text) {
+  const origin = (await db.query('SELECT user_id FROM telegram_links WHERE chat_id = $1', [String(originChatId)])).rows[0];
+  if (!origin) return;
+  return notifyHousehold(db, origin.user_id, text);
 }
 
 async function handleMessage(db, msg) {
@@ -339,9 +447,12 @@ async function handleMessage(db, msg) {
     return screenshots.onPhoto(db, link, msg);
   }
 
-  if (text.startsWith('/')) {
-    await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'command', summary: text.slice(0, 100) });
-    return handleCommand(db, link, chatId, text);
+  // A tap on one of the buttons under the message box
+  const button = BUTTONS[text.trim()];
+  if (button || text.startsWith('/')) {
+    const command = button || text;
+    await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'command', summary: command.slice(0, 100) });
+    return handleCommand(db, link, chatId, command);
   }
 
   // While screenshots are waiting for Save, a reply may be fixes to that list
@@ -443,6 +554,20 @@ async function start(dependencies) {
     return false;
   }
 
+  // The "/" menu beside the message box
+  await callTelegram('setMyCommands', {
+    commands: [
+      { command: 'digest', description: 'Daily update with the card' },
+      { command: 'week', description: 'This week by person and category' },
+      { command: 'offset', description: 'Offset balance, buckets, payoff date' },
+      { command: 'today', description: "Today's spending" },
+      { command: 'month', description: 'Last 30 days' },
+      { command: 'undo', description: 'Remove the last thing I added' },
+      { command: 'new', description: 'Forget earlier questions' },
+      { command: 'help', description: 'Everything I can do' },
+    ],
+  }, { timeoutMs: 15000 }).catch(err => console.error(`[telegram] setMyCommands failed: ${err.message}`));
+
   state.running = true;
   state.stopping = false;
   state.startedAt = new Date().toISOString();
@@ -487,4 +612,4 @@ async function broadcast(db, text, { kind = 'digest', respectDigestFlag = false 
   return sent;
 }
 
-module.exports = { start, stop, status, isConfigured, sendMessage, broadcast, parseExpenseMessage, looksLikeQuestion };
+module.exports = { start, stop, status, isConfigured, sendMessage, sendPhoto, broadcast, broadcastDigest, notifyHousehold, parseExpenseMessage, looksLikeQuestion };
