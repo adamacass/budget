@@ -242,10 +242,44 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
   const anthropic = getClient();
   if (!anthropic) return { error: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
 
+  const today = new Date().toLocaleDateString('en-AU', {
+    timeZone: process.env.TZ || 'Australia/Sydney', day: '2-digit', month: '2-digit', year: '2-digit',
+  });
+
   try {
     const message = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 16000,
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            properties: {
+              readable: { type: 'boolean' },
+              account_kind: { type: 'string', enum: ['offset', 'everyday', 'credit_card', 'other'] },
+              account_name: { type: 'string' },
+              balance: { type: ['number', 'null'] },
+              transactions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    date: { type: 'string' },
+                    description: { type: 'string' },
+                    amount: { type: 'number' },
+                    direction: { type: 'string', enum: ['out', 'in'] },
+                  },
+                  required: ['date', 'description', 'amount', 'direction'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['readable', 'account_kind', 'account_name', 'balance', 'transactions'],
+            additionalProperties: false,
+          },
+        },
+      },
       messages: [{
         role: 'user',
         content: [
@@ -255,32 +289,31 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
           },
           {
             type: 'text',
-            text: `Extract ALL transactions from this bank/credit card statement screenshot. For each transaction return:
-- date: the transaction date in DD/MM/YY format
-- description: the merchant/payee name exactly as shown
-- amount: the dollar amount as a number (no $ sign, no negatives)
+            text: `This is a screenshot from an Australian banking app (often NAB) or a card statement. Read it.
 
-Return ONLY a JSON array, no other text. Example:
-[{"date":"01/03/26","description":"Woolworths Metro Mosman","amount":30.00}]
-
-Rules:
-- Include every visible transaction, don't skip any
-- Use the date as shown on the screenshot. Today is ${new Date().toLocaleDateString('en-AU', { timeZone: process.env.TZ || 'Australia/Sydney', day: '2-digit', month: '2-digit', year: '2-digit' })} (DD/MM/YY). If the screenshot shows no year, use the year that puts the date on or before today, which is usually the current year
-- For amounts, just use the number (e.g. 30.00 not -$30.00)
-- If a transaction says "Pending:", still include it
-- Keep merchant names as-is from the screenshot
-- If you can't read a value clearly, make your best guess`
+- readable: false if this isn't a banking screen, or it's too blurry or cropped to read any transactions or balance.
+- account_kind: "offset" if the screen is a home loan offset account (the account name says Offset, or it's linked to a home loan); "credit_card" for a card; "everyday" for a transaction or everyday account; otherwise "other".
+- account_name: the account name as shown, or "" if none is visible.
+- balance: the account's current balance if it is shown (the main "balance" or "available" figure for this account), as a number; null if not shown.
+- transactions: every visible transaction, none skipped, including pending ones:
+  - date: DD/MM/YY. Today is ${today}. If the screen shows no year, use the year that puts the date on or before today, which is usually the current year. Under a heading like "Today" or "Yesterday", work it out from today.
+  - description: the merchant or payee exactly as shown.
+  - amount: a positive number, no $ sign or minus.
+  - direction: "out" for money leaving the account (purchases, payments, debits, shown with a minus), "in" for money arriving (deposits, salary, transfers in, refunds, shown with a plus or as a credit).
+- If a value is hard to read, give your best guess.`
           }
         ]
       }]
     });
 
-    const text = textOf(message);
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return { error: 'Could not parse transactions from image', raw: text };
-
-    const transactions = JSON.parse(jsonMatch[0]);
-    return { transactions };
+    const parsed = JSON.parse(textOf(message));
+    if (!parsed.readable) return { error: "That doesn't look like a readable banking screenshot." };
+    return {
+      transactions: parsed.transactions || [],
+      account_kind: parsed.account_kind,
+      account_name: parsed.account_name,
+      balance: typeof parsed.balance === 'number' ? parsed.balance : null,
+    };
   } catch (err) {
     console.error('Claude vision API error:', err.message);
     return { error: `Claude API error: ${err.message}` };
@@ -353,4 +386,64 @@ ${list}`,
   return out;
 }
 
-module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage, categorizeTransactions };
+// Turns a reply like "3 is groceries, remove 5, 7 was $12.50" into edits on a
+// pending screenshot batch. `lines` is the numbered list the user is looking at.
+async function parseBatchFixes(reply, { lines, categories }) {
+  const anthropic = getClient();
+  if (!anthropic) return null;
+
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 8000,
+    output_config: {
+      effort: 'low',
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            is_fix: { type: 'boolean' },
+            edits: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  number: { type: 'integer' },
+                  action: { type: 'string', enum: ['remove', 'include', 'set_category', 'set_amount', 'set_description', 'set_date', 'set_balance'] },
+                  value: { type: 'string' },
+                },
+                required: ['number', 'action', 'value'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['is_fix', 'edits'],
+          additionalProperties: false,
+        },
+      },
+    },
+    messages: [{
+      role: 'user',
+      content: `A user is reviewing transactions read from their banking screenshots before saving them. Here is the numbered list they can see:
+
+${lines}
+
+Categories available: ${categories.join(', ')}
+
+Their reply:
+"""${reply}"""
+
+If the reply asks to change the list, set is_fix true and give one edit per change:
+- remove: drop that number. include: put back a number marked as already recorded, possible duplicate or removed.
+- set_category: value is exactly one of the categories above (pick the closest).
+- set_amount: value is a plain number. set_description: value is the new text. set_date: value is YYYY-MM-DD.
+- set_balance: the offset balance shown in the list is wrong; number is 0, value is a plain number.
+- "all", ranges ("3-5") and lists ("2, 4 and 6") expand to one edit per number.
+If the reply is a question or anything else that doesn't change the list, set is_fix false with no edits.`,
+    }],
+  });
+
+  return JSON.parse(textOf(message));
+}
+
+module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage, categorizeTransactions, parseBatchFixes };

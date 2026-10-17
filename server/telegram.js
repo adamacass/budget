@@ -8,7 +8,7 @@
 // are otherwise ignored.
 
 const { askBudget } = require('./ask');
-const { categorizeBatch } = require('./categorize');
+const screenshots = require('./screenshots');
 
 // Overridable so the bot loop can be exercised against a stub in tests.
 const API = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -23,10 +23,6 @@ let state = {
   lastError: null,
   pollFailures: 0,
 };
-
-// Pending screenshot extractions awaiting a Confirm tap, keyed by chat id
-const pendingImports = new Map();
-const PENDING_TTL_MS = 10 * 60 * 1000;
 
 // Recent questions and answers per chat, so follow-ups like "and last month?"
 // make sense. Kept in memory only: a restart starts every chat fresh.
@@ -141,8 +137,10 @@ const HELP = [
   '   <code>42.50 woolies</code>',
   '   <code>coffee 6.20</code>',
   '',
-  '<b>Send a screenshot</b> of your banking app and I\'ll read the',
-  'transactions, categorise them and ask before saving.',
+  '<b>Send screenshots</b> of your banking app (several at once is fine)',
+  'and I\'ll read and categorise the transactions, then ask before saving.',
+  'Reply to fix anything first, e.g. <code>3 groceries</code> or <code>remove 5</code>.',
+  'An offset account screenshot updates the offset balance and its deposits.',
   '',
   '<b>Ask a question</b> about the budget:',
   '   <code>how much did we spend on takeaway this month?</code>',
@@ -273,124 +271,16 @@ async function handleLinking(db, chatId, text, from) {
   return sendMessage(chatId, `✅ Linked to <b>${row.display_name}</b>.\n\n${HELP}`);
 }
 
-async function handlePhoto(db, link, chatId, photos) {
-  const { claude } = deps;
-
-  // Telegram sends several sizes; the last is the largest
-  const best = photos[photos.length - 1];
-  await sendMessage(chatId, '📷 Reading…');
-
-  const file = await callTelegram('getFile', { file_id: best.file_id }, { timeoutMs: 20000 });
-  const url = `${API}/file/bot${token()}/${file.file_path}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Could not download the image (${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const base64 = buf.toString('base64');
-  const mediaType = file.file_path.endsWith('.png') ? 'image/png' : 'image/jpeg';
-
-  const result = await claude.extractTransactionsFromImage(base64, mediaType);
-  if (result.error) {
-    return sendMessage(chatId, `Couldn't read that: ${result.error}`);
-  }
-  const txns = Array.isArray(result.transactions) ? result.transactions : [];
-  if (!txns.length) {
-    return sendMessage(chatId, 'No transactions found in that image.');
-  }
-
-  const cats = await categorizeBatch(db, txns.map(t => t.description || ''));
-  const items = txns.map((t, i) => {
-    const { category, confidence } = cats[i];
-    return {
-      description: t.description || 'Expense',
-      amount: parseFloat(String(t.amount).replace(/[$,]/g, '')) || 0,
-      date: t.date,
-      category,
-      confidence,
-    };
-  }).filter(t => t.amount > 0 && category_is_spending(t.category));
-
-  if (!items.length) {
-    return sendMessage(chatId, 'Found only transfers or unreadable amounts — nothing to add.');
-  }
-
-  const id = `${chatId}-${Date.now()}`;
-  pendingImports.set(String(chatId), { id, items, createdAt: Date.now() });
-
-  const total = items.reduce((s, t) => s + t.amount, 0);
-  const lines = [`Found <b>${items.length}</b> transaction${items.length === 1 ? '' : 's'} totalling <b>${digest.fmt2(total)}</b>:`, ''];
-  for (const t of items.slice(0, 15)) {
-    const flag = t.confidence === 'low' ? ' ⚠️' : '';
-    lines.push(`• ${digest.fmt2(t.amount)}  ${t.description.slice(0, 32)}  <i>${t.category}</i>${flag}`);
-  }
-  if (items.length > 15) lines.push(`…and ${items.length - 15} more`);
-  lines.push('');
-  lines.push('⚠️ = low confidence category, worth checking in the app afterwards.');
-
-  return sendMessage(chatId, lines.join('\n'), {
-    reply_markup: {
-      inline_keyboard: [[
-        { text: `✅ Add all ${items.length}`, callback_data: `import:${id}` },
-        { text: '❌ Discard', callback_data: `discard:${id}` },
-      ]],
-    },
-  });
-}
-
-function category_is_spending(category) {
-  return !(deps.nonSpending || []).includes(category);
-}
-
+// Save / Discard on a screenshot batch (the batch logic lives in screenshots.js)
 async function handleCallback(db, cb) {
   const chatId = cb.message?.chat?.id;
-  const data = String(cb.data || '');
   const link = await getLink(db, chatId);
   if (!link) return;
-
-  const [action, id] = data.split(':');
-  const pending = pendingImports.get(String(chatId));
-
-  const ack = (text) => callTelegram('answerCallbackQuery', { callback_query_id: cb.id, text }, { timeoutMs: 15000 }).catch(() => {});
-
-  if (!pending || pending.id !== id) {
-    await ack('That batch has expired.');
-    return sendMessage(chatId, 'That batch expired — send the screenshot again.');
+  const [action, id] = String(cb.data || '').split(':');
+  if (action === 'import' || action === 'discard') {
+    return screenshots.onCallback(db, link, cb, action, id);
   }
-
-  pendingImports.delete(String(chatId));
-
-  if (action === 'discard') {
-    await ack('Discarded');
-    return sendMessage(chatId, 'Discarded, nothing saved.');
-  }
-
-  let added = 0;
-  let skipped = 0;
-  for (const t of pending.items) {
-    const date = deps.parseDate(t.date) || todayStr();
-    const dupe = (await db.query(
-      'SELECT 1 FROM expenses WHERE user_id = $1 AND description = $2 AND amount = $3 AND expense_date = $4 LIMIT 1',
-      [link.user_id, t.description, t.amount, date]
-    )).rows[0];
-    if (dupe) { skipped++; continue; }
-    await db.query(
-      `INSERT INTO expenses (user_id, category, subcategory, description, amount, expense_date, entry_type)
-       VALUES ($1, $2, 'telegram', $3, $4, $5, 'actual')`,
-      [link.user_id, t.category, t.description, t.amount, date]
-    );
-    added++;
-  }
-
-  await ack(`Added ${added}`);
-  await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'screenshot_import', summary: `${added} added, ${skipped} skipped` });
-
-  const total = pending.items.reduce((s, t) => s + t.amount, 0);
-  await sendMessage(chatId,
-    `✅ Added <b>${added}</b> transaction${added === 1 ? '' : 's'}${skipped ? `, skipped ${skipped} duplicate${skipped === 1 ? '' : 's'}` : ''}.\n` +
-    `Total ${digest.fmt2(total)}.`);
-
-  return notifyOthers(db, chatId, `📷 ${link.display_name} added ${added} transaction${added === 1 ? '' : 's'} (${digest.fmt2(total)}) from a screenshot.`);
 }
-
 async function handleQuestion(db, link, chatId, text) {
   const key = String(chatId);
   const convo = conversations.get(key);
@@ -445,14 +335,17 @@ async function handleMessage(db, msg) {
 
   await db.query('UPDATE telegram_links SET last_seen_at = NOW() WHERE chat_id = $1', [String(chatId)]);
 
-  if (msg.photo && msg.photo.length) {
-    return handlePhoto(db, link, chatId, msg.photo);
+  if (screenshots.imageOf(msg)) {
+    return screenshots.onPhoto(db, link, msg);
   }
 
   if (text.startsWith('/')) {
     await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'command', summary: text.slice(0, 100) });
     return handleCommand(db, link, chatId, text);
   }
+
+  // While screenshots are waiting for Save, a reply may be fixes to that list
+  if (screenshots.hasPending(chatId) && await screenshots.onText(db, link, msg, text)) return;
 
   // A question, or anything without an amount, goes to Claude; the rest is an expense
   const parsed = looksLikeQuestion(text) ? null : parseExpenseMessage(text);
@@ -512,9 +405,7 @@ async function pollLoop() {
 
       // Expire stale screenshot batches and conversations
       const now = Date.now();
-      for (const [k, v] of pendingImports) {
-        if (now - v.createdAt > PENDING_TTL_MS) pendingImports.delete(k);
-      }
+      screenshots.sweep();
       for (const [k, v] of conversations) {
         if (now - v.at > CONVERSATION_TTL_MS) conversations.delete(k);
       }
@@ -534,6 +425,10 @@ async function pollLoop() {
 async function start(dependencies) {
   deps = { askBudget, ...dependencies };
   digest = dependencies.digest;
+  screenshots.init({
+    callTelegram, sendMessage, logActivity, notifyOthers,
+    getDeps: () => deps, apiBase: API, token,
+  });
   if (!isConfigured()) {
     console.log('[telegram] TELEGRAM_BOT_TOKEN not set — bot disabled');
     return false;
@@ -569,7 +464,7 @@ function status() {
     last_poll_at: state.lastPollAt,
     last_error: state.lastError,
     poll_failures: state.pollFailures,
-    pending_batches: pendingImports.size,
+    pending_batches: screenshots._batches.size,
   };
 }
 

@@ -370,7 +370,8 @@ the bot is not enough to use it.
 | You send | It does |
 |---|---|
 | `42.50 woolies` | Logs the expense, auto-categorised |
-| a screenshot of your banking app | Reads the transactions, categorises them, asks before saving |
+| screenshots of your banking app (several at once is fine) | Reads them together, reports any it couldn't read, lists the transactions and asks before saving. Reply with fixes first (`3 groceries`, `remove 5`, `7 is 12.50`, `include 4`). **Discard** deletes the screenshots and the list from the chat |
+| a screenshot of the offset account (e.g. NAB's offset screen) | Records the deposits and withdrawals shown and sets the offset balance to the one on screen. Loan repayments and anything already recorded are left out |
 | `/offset` | Balance, buckets, interest saved, payoff date |
 | `/today` `/week` `/month` | Spending summaries |
 | `/withdraw 2500 new tyres` | Records money out of the offset |

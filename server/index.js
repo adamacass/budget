@@ -2011,7 +2011,8 @@ app.post('/api/screenshots/extract', authMiddleware, asyncHandler(async (req, re
         confidence,
         matched,
         is_transfer: category === 'Transfer',
-        needs_review: confidence === 'low' || category === 'Transfer',
+        // Money coming in (refunds, deposits) isn't spending, so it always gets a look
+        needs_review: confidence === 'low' || category === 'Transfer' || t.direction === 'in',
       };
     });
 
