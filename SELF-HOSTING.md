@@ -394,7 +394,15 @@ creates on startup. That role can read the budget tables but not password hashes
 Telegram chat ids or link codes, and it cannot change anything. Each query runs in a
 read-only transaction with a 5-second time limit. If the role can't be created (some
 hosted databases don't allow it), questions are refused rather than run with the app's
-own access. Questions use Claude Opus 5.5 and cost roughly a cent or two each.
+own access. Questions use Claude Sonnet 5.5 and cost around a cent each. Screenshot
+reading and the in-app advice use Claude Haiku 5.5.
+
+**How screenshot transactions are categorised** (in Telegram and in the app's screenshot
+import): a rule you've taught the app always wins. Otherwise Claude Haiku picks a
+category, using your 150 most-used merchants and the categories you gave them as examples.
+Where Claude is unsure but a built-in merchant pattern is confident (e.g. "BPAY DEFT" is the
+mortgage), the pattern wins. Without an API key, or if the call fails, the built-in
+patterns are used alone. Guesses are flagged ⚠️ so you can check them.
 
 When one of you logs something, the other's chat gets a short note — that's what keeps
 the household in sync. Turn it off per person in **Admin → Connected chats**.

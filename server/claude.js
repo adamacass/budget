@@ -9,6 +9,15 @@ function getClient() {
   return client;
 }
 
+const MODEL = 'claude-haiku-5-5';
+
+// Haiku 5.5 thinks by default, so a response can open with thinking blocks:
+// read the answer from the text blocks rather than content[0]
+function textOf(message) {
+  if (message.stop_reason === 'refusal') throw new Error('Claude declined this request');
+  return message.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+}
+
 async function getPayDayAdvice({ user, netPay, retentionData, offsetBalance, goals, recentExpenses, upcomingExpenses, mortgageRate, mortgagePayment }) {
   const anthropic = getClient();
   if (!anthropic) return { advice: 'Claude API key not configured. Please add ANTHROPIC_API_KEY to your environment variables.' };
@@ -79,11 +88,11 @@ Provide your response as:
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      model: MODEL,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
     });
-    return { advice: message.content[0].text };
+    return { advice: textOf(message) };
   } catch (err) {
     console.error('Claude API error:', err.message);
     return { advice: `Claude API error: ${err.message}. Check your API key.` };
@@ -152,11 +161,11 @@ Be constructive but honest. Focus on how spending impacts offset growth.
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      model: MODEL,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
     });
-    return { summary: message.content[0].text };
+    return { summary: textOf(message) };
   } catch (err) {
     console.error('Claude API error:', err.message);
     return { summary: `Claude API error: ${err.message}` };
@@ -218,11 +227,11 @@ Provide:
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      model: MODEL,
+      max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
     });
-    return { advice: message.content[0].text };
+    return { advice: textOf(message) };
   } catch (err) {
     console.error('Claude API error:', err.message);
     return { advice: `Claude API error: ${err.message}. Check your API key.` };
@@ -235,8 +244,8 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4096,
+      model: MODEL,
+      max_tokens: 16000,
       messages: [{
         role: 'user',
         content: [
@@ -256,7 +265,7 @@ Return ONLY a JSON array, no other text. Example:
 
 Rules:
 - Include every visible transaction, don't skip any
-- Use the date as shown on the screenshot
+- Use the date as shown on the screenshot. Today is ${new Date().toLocaleDateString('en-AU', { timeZone: process.env.TZ || 'Australia/Sydney', day: '2-digit', month: '2-digit', year: '2-digit' })} (DD/MM/YY). If the screenshot shows no year, use the year that puts the date on or before today, which is usually the current year
 - For amounts, just use the number (e.g. 30.00 not -$30.00)
 - If a transaction says "Pending:", still include it
 - Keep merchant names as-is from the screenshot
@@ -266,7 +275,7 @@ Rules:
       }]
     });
 
-    const text = message.content[0].text.trim();
+    const text = textOf(message);
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return { error: 'Could not parse transactions from image', raw: text };
 
@@ -278,4 +287,70 @@ Rules:
   }
 }
 
-module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage };
+// Picks a category for each description from a fixed list, guided by how the
+// household has categorised its own past spending. Returns an array aligned
+// with `descriptions` ({ category, confidence }), or null without an API key.
+async function categorizeTransactions(descriptions, { categories, examples }) {
+  const anthropic = getClient();
+  if (!anthropic || !descriptions.length) return null;
+
+  const exampleText = examples.map(e => `${e.description} => ${e.category}`).join('\n');
+  const list = descriptions.map((d, i) => `${i}. ${d}`).join('\n');
+
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 8000,
+    output_config: {
+      effort: 'low',
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  index: { type: 'integer' },
+                  category: { type: 'string', enum: categories },
+                  confidence: { type: 'string', enum: ['high', 'low'] },
+                },
+                required: ['index', 'category', 'confidence'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['items'],
+          additionalProperties: false,
+        },
+      },
+    },
+    messages: [{
+      role: 'user',
+      content: `Categorise each bank transaction for a Sydney household's budget. Choose exactly one category per transaction from: ${categories.join(', ')}.
+
+How this household has categorised merchants before (follow these where a merchant matches):
+${exampleText || '(no history yet)'}
+
+Guidance:
+- Bank descriptions are noisy: card prefixes like "Sq *", "Zlr*", "Sp ", store numbers and suburbs can be ignored. "Transportfornsw Tap" is public transport.
+- Transfer is money moving between the household's own accounts (to the offset, savings or a partner); it is not spending. Mortgage is a home loan repayment.
+- Use Other only when nothing else fits.
+- confidence is "high" when the merchant is clear or matches the history, "low" when you are guessing (an unfamiliar company name, say).
+
+Transactions:
+${list}`,
+    }],
+  });
+
+  const text = textOf(message);
+  const parsed = JSON.parse(text);
+  const out = new Array(descriptions.length).fill(null);
+  for (const item of parsed.items || []) {
+    if (Number.isInteger(item.index) && item.index >= 0 && item.index < out.length) out[item.index] = item;
+  }
+  return out;
+}
+
+module.exports = { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage, categorizeTransactions };

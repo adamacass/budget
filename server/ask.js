@@ -9,7 +9,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { AI_RO_ROLE } = require('./db');
 
-const MODEL = 'claude-opus-5-5';
+const MODEL = 'claude-sonnet-5-5';
 const MAX_TOOL_ROUNDS = 8;
 const MAX_ROWS = 200;
 const MAX_RESULT_CHARS = 20000;

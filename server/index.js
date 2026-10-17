@@ -11,6 +11,7 @@ const claude = require('./claude');
 const { getPayDayAdvice, getNightlySummary, getAccountSweepAdvice, extractTransactionsFromImage } = claude;
 const telegram = require('./telegram');
 const digest = require('./digest');
+const { categorizeBatch } = require('./categorize');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -2000,10 +2001,10 @@ app.post('/api/screenshots/extract', authMiddleware, asyncHandler(async (req, re
     const result = await extractTransactionsFromImage(image, media_type || 'image/png');
     if (result.error) return res.status(500).json({ error: result.error });
 
-    // Auto-categorize each extracted transaction (using learned rules)
-    const learnedRules = await getCategoryRules();
-    const categorized = result.transactions.map(t => {
-      const { category, confidence, matched } = categorizeTxnDetailed(t.description || '', learnedRules);
+    // Learned rules first, then Claude, falling back to the built-in patterns
+    const cats = await categorizeBatch(await getDb(), result.transactions.map(t => t.description || ''));
+    const categorized = result.transactions.map((t, i) => {
+      const { category, confidence, matched } = cats[i];
       return {
         ...t,
         category,

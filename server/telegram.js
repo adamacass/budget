@@ -8,6 +8,7 @@
 // are otherwise ignored.
 
 const { askBudget } = require('./ask');
+const { categorizeBatch } = require('./categorize');
 
 // Overridable so the bot loop can be exercised against a stub in tests.
 const API = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
@@ -273,7 +274,7 @@ async function handleLinking(db, chatId, text, from) {
 }
 
 async function handlePhoto(db, link, chatId, photos) {
-  const { claude, categorize, getCategoryRules } = deps;
+  const { claude } = deps;
 
   // Telegram sends several sizes; the last is the largest
   const best = photos[photos.length - 1];
@@ -296,9 +297,9 @@ async function handlePhoto(db, link, chatId, photos) {
     return sendMessage(chatId, 'No transactions found in that image.');
   }
 
-  const rules = await getCategoryRules();
-  const items = txns.map(t => {
-    const { category, confidence } = categorize(t.description || '', rules);
+  const cats = await categorizeBatch(db, txns.map(t => t.description || ''));
+  const items = txns.map((t, i) => {
+    const { category, confidence } = cats[i];
     return {
       description: t.description || 'Expense',
       amount: parseFloat(String(t.amount).replace(/[$,]/g, '')) || 0,
