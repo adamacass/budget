@@ -1,13 +1,19 @@
 // Answers free-text questions about the budget, for the Telegram bot.
 //
-// Claude gets one tool, run_sql, and answers by querying the database itself.
-// Every query runs inside a read-only transaction as the budget_ai_ro role
-// (set up in db.js), which can read the budget tables but not password hashes
-// or Telegram data, and cannot write anything. If that role is missing, the
-// query is refused rather than run with the app's full privileges.
+// Claude answers by querying the database itself with run_sql. Every query runs
+// inside a read-only transaction as the budget_ai_ro role (set up in db.js),
+// which can read the budget tables but not password hashes or Telegram data,
+// and cannot write anything. If that role is missing, the query is refused
+// rather than run with the app's full privileges.
+//
+// To change things (move money between buckets, fix an expense...) Claude
+// calls the action tools in ask-actions.js. Those only *propose*: they come
+// back to the bot as `proposals`, and nothing is written until the person
+// taps Apply.
 
 const Anthropic = require('@anthropic-ai/sdk');
 const { AI_RO_ROLE } = require('./db');
+const actions = require('./ask-actions');
 
 const MODEL = 'claude-sonnet-5-5';
 const MAX_TOOL_ROUNDS = 8;
@@ -46,7 +52,13 @@ Answering:
 - Write plain text. You may use <b>bold</b> and <i>italic</i>, and no other markup: no Markdown, no tables, no headings.
 - "I", "me" and "my" refer to the person asking, who is named in the context. "We" and "us" mean the household.
 - If the data can't answer the question, say what is missing instead of estimating silently.
-- You can only read. If asked to add, change or delete something, explain the bot command or app screen that does it (for example "42.50 woolies" logs an expense, /withdraw 500 reason records an offset withdrawal).`;
+
+Making changes:
+- When asked to change something (move money between buckets, log, fix or delete an expense, record an offset deposit or withdrawal, set the offset balance, create or edit a bucket), look up what you need with run_sql (ids, current amounts, unallocated = offset balance minus the sum of active buckets' current_amount), then call the action tools.
+- Actions are proposals: the person sees a list of them and taps Apply before anything happens. So never say a change is done. Say what you've set up, in a line or two; the bot shows the full list under your reply.
+- Do exactly what was asked, with the amounts they gave. Bucket targets are guides, not limits: "put 8k in emergency" means 8,000 into Emergency even if that passes its target, and "the rest to new car" means whatever is left after that. If something looks like a mistake, still propose the literal request and mention the alternative in one line; they can tap Cancel.
+- If an action comes back with an error, fix it and call it again, or explain why it can't be done.
+- Only propose changes the person asked for.`;
 
 const RUN_SQL_TOOL = {
   name: 'run_sql',
@@ -128,7 +140,7 @@ function createMessage(anthropic, round, messages) {
     fallbacks: 'default',
     output_config: { effort: 'medium' },
     system: SYSTEM_PROMPT,
-    tools: [RUN_SQL_TOOL],
+    tools: [RUN_SQL_TOOL, ...actions.TOOLS],
     // The last round is for answering with what has been found so far
     tool_choice: round === MAX_TOOL_ROUNDS ? { type: 'none' } : { type: 'auto' },
     messages,
@@ -154,6 +166,11 @@ async function askBudget({ pool, question, history = [], askerName, contextText 
     { role: 'user', content: `<context>\n${context}\n</context>\n\n${question}` },
   ];
 
+  // Changes Claude proposes, each checked against the data as the earlier
+  // proposals in this request would leave it
+  const proposals = [];
+  let state = null;
+
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     let response;
     try {
@@ -178,7 +195,7 @@ async function askBudget({ pool, question, history = [], askerName, contextText 
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-      return { text: toTelegramHtml(text) || "I couldn't come up with an answer to that.", plain: text };
+      return { text: toTelegramHtml(text) || (proposals.length ? 'Here’s what I’d change:' : "I couldn't come up with an answer to that."), plain: text, proposals };
     }
 
     // Echo the full content back (thinking blocks included) and answer every tool call
@@ -186,6 +203,15 @@ async function askBudget({ pool, question, history = [], askerName, contextText 
     const results = [];
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
+      if (actions.NAMES.has(block.name)) {
+        state = state || await actions.snapshot(pool);
+        const c = await actions.check(pool, state, block.name, block.input || {});
+        if (c.ok) proposals.push({ name: block.name, input: block.input, summary: c.summary });
+        results.push(c.ok
+          ? { type: 'tool_result', tool_use_id: block.id, content: `Proposed (not applied until the person taps Apply): ${c.summary.replace(/<[^>]+>/g, '')}` }
+          : { type: 'tool_result', tool_use_id: block.id, is_error: true, content: c.error });
+        continue;
+      }
       if (block.name !== 'run_sql' || typeof block.input?.sql !== 'string') {
         results.push({ type: 'tool_result', tool_use_id: block.id, is_error: true, content: 'Unknown tool or missing sql.' });
         continue;
@@ -198,7 +224,7 @@ async function askBudget({ pool, question, history = [], askerName, contextText 
     messages.push({ role: 'user', content: results });
   }
 
-  return { text: "That took more lookups than I'm allowed. Try a narrower question." };
+  return { text: "That took more lookups than I'm allowed. Try a narrower question.", proposals: [] };
 }
 
 module.exports = { askBudget, runReadOnlySql, toTelegramHtml };

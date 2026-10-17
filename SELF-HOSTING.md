@@ -384,8 +384,18 @@ the bot is not enough to use it.
 
 Screenshot reading and questions need `ANTHROPIC_API_KEY`. Everything else works without it.
 
+**Asking for changes.** You can also ask it to change things: move money between offset
+buckets, log, fix or delete an expense, record an offset deposit or withdrawal, set the
+offset balance, or create or edit a bucket ("put the spare 8k in emergency and the rest
+in new car"). Claude doesn't write to the database itself. It proposes specific changes,
+each checked against the current numbers (buckets can never hold more than the offset),
+and the bot lists them with **Apply** and **Cancel** buttons. Apply re-checks everything
+and writes it in one transaction, so if the numbers changed in the meantime nothing
+half-happens, and the other person gets a note. The actions are in `server/ask-actions.js`.
+
 **How it tells a question from an expense.** A message that ends in `?` or starts with a
-question word (what, how, which, are, did…) is a question, even if it contains a number.
+question word (what, how, which, are, did…) or an instruction (move, allocate, transfer,
+change, delete…) goes to Claude, even if it contains a number.
 Otherwise, a message with an amount in it is logged as an expense, and anything else goes
 to Claude. It remembers the last few questions in each chat for 30 minutes, so follow-ups
 like "and in July?" work.

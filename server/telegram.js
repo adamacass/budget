@@ -8,6 +8,7 @@
 // are otherwise ignored.
 
 const { askBudget } = require('./ask');
+const askActions = require('./ask-actions');
 const screenshots = require('./screenshots');
 const digestCard = require('./digest-card');
 
@@ -210,9 +211,11 @@ function parseExpenseMessage(text) {
 // "how much did we spend on 2 dinners?" contains an amount but is a question,
 // so questions are recognised before expenses are parsed
 const QUESTION_START = /^(what|what's|whats|how|why|when|where|which|who|can|could|should|would|will|is|are|am|do|does|did|was|were|have|has|tell|show|explain|compare|summari[sz]e|list|give|any|ask)\b/i;
+// ...and so are instructions: "move 500 to new car" is a request, not a $500 expense
+const INSTRUCTION_START = /^(please\s+)?(move|allocate|reallocate|transfer|put|shift|take|change|set|update|edit|fix|correct|delete|remove|undo|recategori[sz]e|categori[sz]e|rename|split|create|make|start|top up|withdraw|deposit|record|mark)\b/i;
 function looksLikeQuestion(text) {
   const t = String(text || '').trim();
-  return t.endsWith('?') || QUESTION_START.test(t);
+  return t.endsWith('?') || QUESTION_START.test(t) || INSTRUCTION_START.test(t);
 }
 
 function todayStr() {
@@ -236,6 +239,11 @@ const HELP = [
   '<b>Ask a question</b> about the budget:',
   '   <code>how much did we spend on takeaway this month?</code>',
   '   <code>are we on track for the holiday bucket?</code>',
+  '',
+  '<b>Ask for a change</b> and I\'ll set it up for you to approve:',
+  '   <code>put the spare 8k in emergency, the rest in new car</code>',
+  '   <code>the $45 Coles on Tuesday was mine, and it\'s groceries</code>',
+  'Nothing changes until you tap <b>Apply</b>.',
   '',
   '<b>Buttons</b> under the message box: 📊 daily update, 🧾 this week, 💰 offset, ❓ help.',
   '',
@@ -375,7 +383,11 @@ async function handleCallback(db, cb) {
   if (action === 'import' || action === 'discard') {
     return screenshots.onCallback(db, link, cb, action, id);
   }
+  if (action === 'apply' || action === 'cancel') {
+    return onChangesCallback(db, link, cb, action, id);
+  }
 }
+
 async function handleQuestion(db, link, chatId, text) {
   const key = String(chatId);
   const convo = conversations.get(key);
@@ -406,7 +418,66 @@ async function handleQuestion(db, link, chatId, text) {
     conversations.set(key, { turns: turns.slice(-CONVERSATION_TURNS * 2), at: Date.now() });
   }
   await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'question', summary: text.slice(0, 200) });
-  return sendMessage(chatId, answer.text);
+  await sendMessage(chatId, answer.text);
+  if (answer.proposals?.length) return proposeChanges(chatId, link, answer.proposals);
+}
+
+// --- changes Claude proposed, waiting for Apply ------------------------------
+
+const pendingChanges = new Map();     // chatId -> { id, proposals, userId, at }
+const CHANGES_TTL_MS = 30 * 60 * 1000;
+
+async function proposeChanges(chatId, link, proposals) {
+  const id = `${Date.now().toString(36)}`;
+  pendingChanges.set(String(chatId), { id, proposals, userId: link.user_id, at: Date.now() });
+  const lines = [`<b>Apply ${proposals.length === 1 ? 'this change' : `these ${proposals.length} changes`}?</b>`, ''];
+  proposals.forEach((p, i) => lines.push(`${i + 1}. ${p.summary}`));
+  return sendMessage(chatId, lines.join('\n'), {
+    reply_markup: { inline_keyboard: [[
+      { text: '✅ Apply', callback_data: `apply:${id}` },
+      { text: '❌ Cancel', callback_data: `cancel:${id}` },
+    ]] },
+  });
+}
+
+async function onChangesCallback(db, link, cb, action, id) {
+  const chatId = String(cb.message?.chat?.id);
+  const messageId = cb.message?.message_id;
+  const pending = pendingChanges.get(chatId);
+  const ack = (text) => callTelegram('answerCallbackQuery', { callback_query_id: cb.id, text }, { timeoutMs: 15000 }).catch(() => {});
+  const replace = (text) => callTelegram('editMessageText', {
+    chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML',
+  }, { timeoutMs: 15000 }).catch(() => sendMessage(chatId, text));
+
+  if (!pending || pending.id !== id || Date.now() - pending.at > CHANGES_TTL_MS) {
+    pendingChanges.delete(chatId);
+    await ack('That has expired. Ask again.');
+    return replace('<i>Expired, nothing changed. Ask again if you still want it.</i>');
+  }
+  pendingChanges.delete(chatId);
+  const list = pending.proposals.map((p, i) => `${i + 1}. ${p.summary}`).join('\n');
+
+  if (action === 'cancel') {
+    await ack('Cancelled');
+    return replace(`❌ <b>Cancelled</b>, nothing changed.\n\n<s>${list.replace(/<\/?[bi]>/g, '')}</s>`);
+  }
+
+  try {
+    await deps.applyChanges(db, pending.proposals, link.user_id);
+  } catch (err) {
+    console.error(`[ask] apply failed: ${err.message}`);
+    await ack('Not applied');
+    return replace(`⚠️ <b>Not applied</b>: ${err.message.replace(/[<>&]/g, '')}\n\nNothing changed. Ask again and I'll redo it with the current numbers.`);
+  }
+  await ack('Done');
+  await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'claude_changes', summary: list.replace(/<[^>]+>/g, '').slice(0, 500) });
+  await replace(`✅ <b>Done</b>\n\n${list}`);
+
+  // Remember it in the conversation, so "undo that" or a follow-up makes sense
+  const convo = conversations.get(chatId);
+  if (convo) convo.turns.push({ role: 'user', content: '(Tapped Apply.)' }, { role: 'assistant', content: `Applied: ${list.replace(/<[^>]+>/g, '')}` });
+
+  return notifyOthers(db, chatId, `✏️ <b>${link.display_name}</b> made ${pending.proposals.length === 1 ? 'a change' : `${pending.proposals.length} changes`} via the bot:\n\n${list}`);
 }
 
 // Tell everyone except the person who did something, so the household stays in
@@ -534,7 +605,7 @@ async function pollLoop() {
 }
 
 async function start(dependencies) {
-  deps = { askBudget, ...dependencies };
+  deps = { askBudget, applyChanges: askActions.apply, ...dependencies };
   digest = dependencies.digest;
   screenshots.init({
     callTelegram, sendMessage, logActivity, notifyOthers,
