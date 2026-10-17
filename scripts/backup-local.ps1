@@ -1,4 +1,4 @@
-# Back up the local Docker Compose Postgres to ./backups/.
+﻿# Back up the local Docker Compose Postgres to ./backups/.
 #
 #   .\scripts\backup-local.ps1
 #

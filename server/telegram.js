@@ -7,6 +7,8 @@
 // code generated in the admin UI. Unlinked chats get a single instruction and
 // are otherwise ignored.
 
+const { askBudget } = require('./ask');
+
 // Overridable so the bot loop can be exercised against a stub in tests.
 const API = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org';
 
@@ -24,6 +26,12 @@ let state = {
 // Pending screenshot extractions awaiting a Confirm tap, keyed by chat id
 const pendingImports = new Map();
 const PENDING_TTL_MS = 10 * 60 * 1000;
+
+// Recent questions and answers per chat, so follow-ups like "and last month?"
+// make sense. Kept in memory only: a restart starts every chat fresh.
+const conversations = new Map();
+const CONVERSATION_TTL_MS = 30 * 60 * 1000;
+const CONVERSATION_TURNS = 6;
 
 let deps = null;
 // Module-scoped so every handler can format money, not just handleCommand
@@ -111,6 +119,14 @@ function parseExpenseMessage(text) {
   return { amount, description: description || 'Expense' };
 }
 
+// "how much did we spend on 2 dinners?" contains an amount but is a question,
+// so questions are recognised before expenses are parsed
+const QUESTION_START = /^(what|what's|whats|how|why|when|where|which|who|can|could|should|would|will|is|are|am|do|does|did|was|were|have|has|tell|show|explain|compare|summari[sz]e|list|give|any|ask)\b/i;
+function looksLikeQuestion(text) {
+  const t = String(text || '').trim();
+  return t.endsWith('?') || QUESTION_START.test(t);
+}
+
 function todayStr() {
   return new Date().toISOString().split('T')[0];
 }
@@ -127,6 +143,10 @@ const HELP = [
   '<b>Send a screenshot</b> of your banking app and I\'ll read the',
   'transactions, categorise them and ask before saving.',
   '',
+  '<b>Ask a question</b> about the budget:',
+  '   <code>how much did we spend on takeaway this month?</code>',
+  '   <code>are we on track for the holiday bucket?</code>',
+  '',
   '<b>Commands</b>',
   '/offset — balance, buckets, payoff date',
   '/today — today\'s spending',
@@ -137,6 +157,7 @@ const HELP = [
   '/deposit 500 refund — record money in',
   '/undo — remove the last thing I added',
   '/mute /unmute — turn the daily digest off and on',
+  '/new — start a fresh conversation (forget earlier questions)',
   '/help — this message',
 ].join('\n');
 
@@ -207,6 +228,10 @@ async function handleCommand(db, link, chatId, text) {
     case '/unmute':
       await db.query('UPDATE telegram_links SET digest_enabled = 1 WHERE chat_id = $1', [String(chatId)]);
       return sendMessage(chatId, 'Daily digest on.');
+
+    case '/new':
+      conversations.delete(String(chatId));
+      return sendMessage(chatId, 'Fresh start. Ask away.');
 
     default:
       return sendMessage(chatId, `Don't know <code>${cmd}</code>. /help for the list.`);
@@ -365,6 +390,39 @@ async function handleCallback(db, cb) {
   return notifyOthers(db, chatId, `📷 ${link.display_name} added ${added} transaction${added === 1 ? '' : 's'} (${digest.fmt2(total)}) from a screenshot.`);
 }
 
+async function handleQuestion(db, link, chatId, text) {
+  const key = String(chatId);
+  const convo = conversations.get(key);
+  const history = convo && Date.now() - convo.at < CONVERSATION_TTL_MS ? convo.turns : [];
+
+  // Telegram clears "typing…" after ~5 seconds, and an answer can take longer
+  const typing = () => callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }, { timeoutMs: 10000 }).catch(() => {});
+  typing();
+  const typingTimer = setInterval(typing, 4500);
+
+  let answer;
+  try {
+    const mc = await deps.getMortgageConfig(db);
+    const contextText = (await digest.buildOffsetSummary(db, { mortgageConfig: mc })).replace(/<[^>]+>/g, '');
+    answer = await deps.askBudget({
+      pool: db,
+      question: text,
+      history,
+      askerName: link.display_name,
+      contextText,
+    });
+  } finally {
+    clearInterval(typingTimer);
+  }
+
+  if (answer.plain) {
+    const turns = [...history, { role: 'user', content: text }, { role: 'assistant', content: answer.plain }];
+    conversations.set(key, { turns: turns.slice(-CONVERSATION_TURNS * 2), at: Date.now() });
+  }
+  await logActivity(db, { chatId, userId: link.user_id, direction: 'in', kind: 'question', summary: text.slice(0, 200) });
+  return sendMessage(chatId, answer.text);
+}
+
 // Tell the *other* linked chats about something, so the household stays in sync
 async function notifyOthers(db, originChatId, text) {
   const others = (await db.query(
@@ -395,10 +453,11 @@ async function handleMessage(db, msg) {
     return handleCommand(db, link, chatId, text);
   }
 
-  // Anything else is treated as an expense
-  const parsed = parseExpenseMessage(text);
+  // A question, or anything without an amount, goes to Claude; the rest is an expense
+  const parsed = looksLikeQuestion(text) ? null : parseExpenseMessage(text);
   if (!parsed) {
-    return sendMessage(chatId, "I couldn't find an amount in that. Try <code>42.50 woolies</code>, or /help.");
+    if (!text.trim()) return;
+    return handleQuestion(db, link, chatId, text);
   }
 
   const rules = await deps.getCategoryRules();
@@ -450,10 +509,13 @@ async function pollLoop() {
         }
       }
 
-      // Expire stale screenshot batches
+      // Expire stale screenshot batches and conversations
       const now = Date.now();
       for (const [k, v] of pendingImports) {
         if (now - v.createdAt > PENDING_TTL_MS) pendingImports.delete(k);
+      }
+      for (const [k, v] of conversations) {
+        if (now - v.at > CONVERSATION_TTL_MS) conversations.delete(k);
       }
     } catch (err) {
       if (state.stopping) break;
@@ -469,7 +531,7 @@ async function pollLoop() {
 }
 
 async function start(dependencies) {
-  deps = dependencies;
+  deps = { askBudget, ...dependencies };
   digest = dependencies.digest;
   if (!isConfigured()) {
     console.log('[telegram] TELEGRAM_BOT_TOKEN not set — bot disabled');
@@ -529,4 +591,4 @@ async function broadcast(db, text, { kind = 'digest', respectDigestFlag = false 
   return sent;
 }
 
-module.exports = { start, stop, status, isConfigured, sendMessage, broadcast, parseExpenseMessage };
+module.exports = { start, stop, status, isConfigured, sendMessage, broadcast, parseExpenseMessage, looksLikeQuestion };

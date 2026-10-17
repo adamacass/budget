@@ -1,4 +1,4 @@
-# Copy the live Render Postgres database into the local Docker Compose Postgres.
+﻿# Copy the live Render Postgres database into the local Docker Compose Postgres.
 #
 #   .\scripts\migrate-from-render.ps1 "postgresql://user:pass@dpg-xxx.oregon-postgres.render.com/dbname"
 #

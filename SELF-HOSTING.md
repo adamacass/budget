@@ -378,8 +378,23 @@ the bot is not enough to use it.
 | `/undo` | Removes the last thing it added |
 | `/digest` | The full daily update, now |
 | `/mute` `/unmute` | Turns the daily digest off and on |
+| a question, e.g. `how much did we spend on takeaway in September?` | Claude looks it up in the database and answers |
+| `/new` | Forgets earlier questions, so the next one starts fresh |
 
-Screenshot reading needs `ANTHROPIC_API_KEY`. Everything else works without it.
+Screenshot reading and questions need `ANTHROPIC_API_KEY`. Everything else works without it.
+
+**How it tells a question from an expense.** A message that ends in `?` or starts with a
+question word (what, how, which, are, did…) is a question, even if it contains a number.
+Otherwise, a message with an amount in it is logged as an expense, and anything else goes
+to Claude. It remembers the last few questions in each chat for 30 minutes, so follow-ups
+like "and in July?" work.
+
+**What Claude can see.** Its queries run as a database role, `budget_ai_ro`, that the app
+creates on startup. That role can read the budget tables but not password hashes,
+Telegram chat ids or link codes, and it cannot change anything. Each query runs in a
+read-only transaction with a 5-second time limit. If the role can't be created (some
+hosted databases don't allow it), questions are refused rather than run with the app's
+own access. Questions use Claude Opus 5.5 and cost roughly a cent or two each.
 
 When one of you logs something, the other's chat gets a short note — that's what keeps
 the household in sync. Turn it off per person in **Admin → Connected chats**.

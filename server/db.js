@@ -479,6 +479,8 @@ async function initSchema() {
     }
   }
 
+  await ensureAiReadOnlyRole();
+
   // Ensure retention profiles exist for all users
   const allUsers = (await pool.query('SELECT id, username FROM users')).rows;
   for (const u of allUsers) {
@@ -490,6 +492,39 @@ async function initSchema() {
         [u.id, 'auto', 8, 10, src]
       );
     }
+  }
+}
+
+// The role Claude's SQL runs as when answering questions from the Telegram bot
+// (server/ask.js does SET LOCAL ROLE to it). NOLOGIN, so it has no password and
+// can't be connected to directly. It can read the budget tables only: no
+// password hashes, no Telegram link codes or chat ids, and no writes anywhere.
+const AI_RO_ROLE = 'budget_ai_ro';
+const AI_READABLE_TABLES = [
+  'expenses', 'income_entries', 'fund_allocations', 'savings_goals', 'levers',
+  'account_balances', 'upcoming_expenses', 'category_budgets', 'category_rules',
+  'goal_contributions', 'offset_withdrawals', 'planned_withdrawals',
+  'retention_profiles', 'weekly_checkins',
+];
+const AI_READABLE_USER_COLUMNS = ['id', 'username', 'display_name', 'role', 'pay_cycle', 'mortgage_contribution'];
+
+async function ensureAiReadOnlyRole() {
+  try {
+    await pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${AI_RO_ROLE}') THEN
+          CREATE ROLE ${AI_RO_ROLE} NOLOGIN;
+        END IF;
+      END $$;
+    `);
+    await pool.query(`GRANT ${AI_RO_ROLE} TO CURRENT_USER`).catch(() => { /* superusers don't need it */ });
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${AI_RO_ROLE}`);
+    await pool.query(`GRANT SELECT ON ${AI_READABLE_TABLES.join(', ')} TO ${AI_RO_ROLE}`);
+    await pool.query(`REVOKE ALL ON users FROM ${AI_RO_ROLE}`);
+    await pool.query(`GRANT SELECT (${AI_READABLE_USER_COLUMNS.join(', ')}) ON users TO ${AI_RO_ROLE}`);
+  } catch (e) {
+    // Hosted Postgres often refuses CREATE ROLE. Questions then fail closed in ask.js.
+    console.error(`[ask] could not set up the ${AI_RO_ROLE} role: ${e.message}`);
   }
 }
 
@@ -1059,4 +1094,4 @@ async function getCategoryRules() {
   }
 }
 
-module.exports = { getDb, autoCategorizeTxn, categorizeTxnDetailed, normalizeDescription, getCategoryRules };
+module.exports = { getDb, autoCategorizeTxn, categorizeTxnDetailed, normalizeDescription, getCategoryRules, AI_RO_ROLE };
