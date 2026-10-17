@@ -257,6 +257,21 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
             type: 'object',
             properties: {
               readable: { type: 'boolean' },
+              screen_type: { type: 'string', enum: ['banking', 'bill'] },
+              bill: {
+                type: 'object',
+                properties: {
+                  biller: { type: 'string' },
+                  amount_due: { type: ['number', 'null'] },
+                  due_date: { type: ['string', 'null'] },
+                  reference: { type: ['string', 'null'] },
+                  category: { type: 'string', enum: ['Utilities', 'Insurance', 'Subscriptions', 'Health', 'Education', 'Home', 'Transport', 'Other'] },
+                  period_start: { type: ['string', 'null'] },
+                  period_end: { type: ['string', 'null'] },
+                },
+                required: ['biller', 'amount_due', 'due_date', 'reference', 'category', 'period_start', 'period_end'],
+                additionalProperties: false,
+              },
               account_kind: { type: 'string', enum: ['offset', 'everyday', 'credit_card', 'other'] },
               account_name: { type: 'string' },
               balance: { type: ['number', 'null'] },
@@ -275,7 +290,7 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
                 },
               },
             },
-            required: ['readable', 'account_kind', 'account_name', 'balance', 'transactions'],
+            required: ['readable', 'screen_type', 'bill', 'account_kind', 'account_name', 'balance', 'transactions'],
             additionalProperties: false,
           },
         },
@@ -283,15 +298,23 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
       messages: [{
         role: 'user',
         content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data: base64Image }
-          },
+          mediaType === 'application/pdf'
+            ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Image } }
+            : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Image } },
           {
             type: 'text',
-            text: `This is a screenshot from an Australian banking app (often NAB) or a card statement. Read it.
+            text: `This is either a screenshot from an Australian banking app (often NAB) or card statement, or a bill (energy, water, phone, internet, insurance, rates, strata, rego, a subscription renewal...), photographed or as a PDF. Read it.
 
-- readable: false if this isn't a banking screen, or it's too blurry or cropped to read any transactions or balance.
+- readable: false if it's neither, or too blurry or cropped to read.
+- screen_type: "bill" for a bill or invoice asking to be paid; "banking" for a banking app or statement screen.
+- bill (for a banking screen, fill it with biller "" and nulls, category "Other"):
+  - biller: the company, short and recognisable (e.g. "AGL Energy", "Sydney Water").
+  - amount_due: the total now due, as a number; null if not shown.
+  - due_date: YYYY-MM-DD; null if not shown. Today is ${today} (DD/MM/YY).
+  - reference: the BPAY biller code and reference, or account/customer number, as shown; null if none.
+  - category: the closest budget category.
+  - period_start / period_end: the billing period as YYYY-MM-DD, if shown; otherwise null.
+- For a bill, use account_kind "other", account_name "", balance null and an empty transactions list.
 - account_kind: "offset" if the screen is a home loan offset account (the account name says Offset, or it's linked to a home loan); "credit_card" for a card; "everyday" for a transaction or everyday account; otherwise "other".
 - account_name: the account name as shown, or "" if none is visible.
 - balance: the account's current balance if it is shown (the main "balance" or "available" figure for this account), as a number; null if not shown.
@@ -307,9 +330,11 @@ async function extractTransactionsFromImage(base64Image, mediaType) {
     });
 
     const parsed = JSON.parse(textOf(message));
-    if (!parsed.readable) return { error: "That doesn't look like a readable banking screenshot." };
+    if (!parsed.readable) return { error: "That doesn't look like a readable banking screenshot or bill." };
     return {
-      transactions: parsed.transactions || [],
+      screen_type: parsed.screen_type,
+      bill: parsed.screen_type === 'bill' ? parsed.bill : null,
+      transactions: parsed.screen_type === 'bill' ? [] : (parsed.transactions || []),
       account_kind: parsed.account_kind,
       account_name: parsed.account_name,
       balance: typeof parsed.balance === 'number' ? parsed.balance : null,

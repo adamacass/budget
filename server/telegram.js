@@ -9,6 +9,7 @@
 
 const { askBudget } = require('./ask');
 const askActions = require('./ask-actions');
+const bills = require('./bills');
 const screenshots = require('./screenshots');
 const digestCard = require('./digest-card');
 
@@ -85,12 +86,13 @@ const BUTTONS = {
   '📊 Daily update': '/digest',
   '🧾 This week': '/week',
   '💰 Offset': '/offset',
+  '📅 Bills': '/bills',
   '❓ Help': '/help',
 };
 const KEYBOARD = {
   keyboard: [
     [{ text: '📊 Daily update' }, { text: '🧾 This week' }],
-    [{ text: '💰 Offset' }, { text: '❓ Help' }],
+    [{ text: '💰 Offset' }, { text: '📅 Bills' }, { text: '❓ Help' }],
   ],
   is_persistent: true,
   resize_keyboard: true,
@@ -119,6 +121,28 @@ async function sendPhoto(chatId, png, { caption, disableNotification = false, re
   }
 }
 
+// A PDF (or any file) as a document, e.g. a bill that arrived as a PDF
+async function sendDocument(chatId, bytes, { filename = 'bill.pdf', type = 'application/pdf', caption, replyMarkup } = {}) {
+  const t = token();
+  if (!t) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('document', new Blob([bytes], { type }), filename);
+  if (caption) { form.append('caption', caption); form.append('parse_mode', 'HTML'); }
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+  const res = await fetch(`${API}/bot${t}/sendDocument`, { method: 'POST', body: form });
+  const json = await res.json().catch(() => ({}));
+  if (!json.ok) throw new Error(json.description || `Telegram sendDocument failed (${res.status})`);
+  return json.result;
+}
+
+// A stored bill file, as a photo if it's an image and a document otherwise
+function sendBillFile(chatId, { file, fileType, caption, replyMarkup, name = 'bill' }) {
+  if (!file) return sendMessage(chatId, caption, replyMarkup ? { reply_markup: replyMarkup } : {});
+  if (/^image\//.test(fileType || '')) return sendPhoto(chatId, file, { caption, replyMarkup });
+  return sendDocument(chatId, file, { filename: `${name.replace(/[^\w-]+/g, '_')}.pdf`, type: fileType || 'application/pdf', caption, replyMarkup });
+}
+
 // Telegram caps photo captions at 1024 characters (after HTML is parsed)
 const CAPTION_LIMIT = 1000;
 
@@ -126,10 +150,12 @@ async function buildUpdate(db) {
   const { getMortgageConfig, nonSpending } = deps;
   const mortgageConfig = await getMortgageConfig(db);
   const data = await digest.buildDigestData(db, { mortgageConfig, nonSpending });
+  const dueSoon = await bills.dueSoonLines(db);
+  const withBills = text => (dueSoon.length ? `${text}\n\n${dueSoon.join('\n')}` : text);
   return {
     data,
-    caption: digest.buildDigestCaption(data),
-    fallback: await digest.buildDailyDigest(db, { mortgageConfig, nonSpending, data }),
+    caption: withBills(digest.buildDigestCaption(data)),
+    fallback: withBills(await digest.buildDailyDigest(db, { mortgageConfig, nonSpending, data })),
   };
 }
 
@@ -236,6 +262,9 @@ const HELP = [
   'Reply to fix anything first, e.g. <code>3 groceries</code> or <code>remove 5</code>.',
   'An offset account screenshot updates the offset balance and its deposits.',
   '',
+  '<b>Send a bill</b> (photo or PDF) and I\'ll save it, compare it with the last one,',
+  'tell the other person, and remind you both before it\'s due.',
+  '',
   '<b>Ask a question</b> about the budget:',
   '   <code>how much did we spend on takeaway this month?</code>',
   '   <code>are we on track for the holiday bucket?</code>',
@@ -245,12 +274,13 @@ const HELP = [
   '   <code>the $45 Coles on Tuesday was mine, and it\'s groceries</code>',
   'Nothing changes until you tap <b>Apply</b>.',
   '',
-  '<b>Buttons</b> under the message box: 📊 daily update, 🧾 this week, 💰 offset, ❓ help.',
+  '<b>Buttons</b> under the message box: 📊 daily update, 🧾 this week, 💰 offset, 📅 bills, ❓ help.',
   '',
   '<b>Commands</b>',
   '/offset — balance, buckets, payoff date',
   '/today — today\'s spending',
   '/week — last 7 days, by person and category',
+  '/bills — unpaid bills; send a photo or PDF of a bill to add one',
   '/month — last 30 days',
   '/digest — the full daily update now',
   '/withdraw 500 new tyres — record money out of the offset',
@@ -286,6 +316,9 @@ async function handleCommand(db, link, chatId, text) {
 
     case '/digest':
       return sendUpdate(chatId, link.display_name, await buildUpdate(db));
+
+    case '/bills':
+      return listBills(db, chatId);
 
     case '/withdraw':
     case '/deposit': {
@@ -385,6 +418,9 @@ async function handleCallback(db, cb) {
   }
   if (action === 'apply' || action === 'cancel') {
     return onChangesCallback(db, link, cb, action, id);
+  }
+  if (action === 'billpaid' || action === 'billshow') {
+    return onBillCallback(db, link, cb, action, id);
   }
 }
 
@@ -495,6 +531,95 @@ async function notifyHousehold(db, actorUserId, text) {
       console.error(`[telegram] alert to ${o.chat_id} failed: ${err.message}`);
     }
   }
+}
+
+// --- bills -------------------------------------------------------------------
+
+const billButtons = (id, { show = true } = {}) => ({
+  inline_keyboard: [[
+    { text: '✅ Paid', callback_data: `billpaid:${id}` },
+    ...(show ? [{ text: '🖼 Show bill', callback_data: `billshow:${id}` }] : []),
+  ]],
+});
+
+// A new bill goes to the other person with the bill itself attached
+async function notifyOthersWithFile(db, actorUserId, { file, fileType, caption, billId }) {
+  const others = (await db.query(
+    'SELECT chat_id, user_id FROM telegram_links WHERE active = 1 AND alerts_enabled = 1 AND user_id <> $1', [actorUserId]
+  )).rows;
+  for (const o of others) {
+    try {
+      await sendBillFile(o.chat_id, { file, fileType, caption, replyMarkup: billButtons(billId, { show: false }) });
+      await logActivity(db, { chatId: o.chat_id, userId: o.user_id, direction: 'out', kind: 'household_alert', summary: caption.replace(/<[^>]+>/g, '').slice(0, 200) });
+    } catch (err) {
+      console.error(`[telegram] bill to ${o.chat_id} failed: ${err.message}`);
+    }
+  }
+}
+
+function reminderText(b) {
+  const today = bills.localDate(0);
+  const when = b.due_date < today ? `was due ${bills.niceDate(b.due_date)}, <b>overdue</b>`
+    : b.due_date === today ? '<b>due today</b>'
+    : `due in ${Math.round((new Date(b.due_date + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000)} days (${bills.niceDate(b.due_date)})`;
+  return `⏰ <b>${bills.esc(b.biller)}</b> ${b.amount != null ? digest.fmt2(b.amount) : ''} ${when}` +
+    (b.reference ? `\nref ${bills.esc(b.reference)}` : '');
+}
+
+// Run every few minutes from start(): sends each bill's reminders once, to
+// everyone, from the morning digest time onwards
+async function sendBillReminders(db) {
+  if (new Date().getHours() < 8) return;
+  const chats = (await db.query('SELECT chat_id, user_id FROM telegram_links WHERE active = 1')).rows;
+  if (!chats.length) return;
+  for (const b of await bills.dueReminders(db)) {
+    for (const c of chats) {
+      await sendMessage(c.chat_id, reminderText(b), { reply_markup: billButtons(b.id) })
+        .catch(err => console.error(`[bills] reminder to ${c.chat_id} failed: ${err.message}`));
+    }
+    await bills.markReminded(db, b.id, b.kind);
+    await logActivity(db, { direction: 'out', kind: 'bill_reminder', summary: `${b.biller} ${b.kind}` });
+  }
+}
+
+async function listBills(db, chatId) {
+  const rows = await bills.unpaid(db);
+  if (!rows.length) {
+    return sendMessage(chatId, '📅 <b>No unpaid bills.</b>\n\nSend me a photo or PDF of a bill and I\'ll keep track of it and remind you both.');
+  }
+  const total = rows.reduce((s, b) => s + (b.amount || 0), 0);
+  const lines = [`📅 <b>Unpaid bills</b>  ${digest.fmt2(total)}`, ''];
+  for (const b of rows) lines.push(reminderText(b).replace(/^⏰ /, '• '));
+  // One row of buttons per bill (Telegram allows plenty)
+  const keyboard = rows.slice(0, 20).map(b => [
+    { text: `🖼 ${b.biller.slice(0, 18)}`, callback_data: `billshow:${b.id}` },
+    { text: '✅ Paid', callback_data: `billpaid:${b.id}` },
+  ]);
+  return sendMessage(chatId, lines.join('\n'), { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function onBillCallback(db, link, cb, action, id) {
+  const chatId = String(cb.message?.chat?.id);
+  const ack = (text) => callTelegram('answerCallbackQuery', { callback_query_id: cb.id, text }, { timeoutMs: 15000 }).catch(() => {});
+  const bill = await bills.getBill(db, parseInt(id));
+  if (!bill) return ack('That bill is gone.');
+
+  if (action === 'billshow') {
+    await ack('');
+    return sendBillFile(chatId, {
+      file: bill.file, fileType: bill.file_type, name: bill.biller,
+      caption: `🧾 <b>${bills.esc(bill.biller)}</b> ${bill.amount != null ? digest.fmt2(bill.amount) : ''}, due ${bills.niceDate(bill.due_date)}` +
+        (bill.paid_at ? '\n✅ paid' : ''),
+    });
+  }
+
+  // billpaid
+  const paid = await bills.markPaid(db, bill.id, link.user_id);
+  if (!paid) return ack('Already marked paid');
+  await ack('Marked paid');
+  await callTelegram('editMessageReplyMarkup', { chat_id: chatId, message_id: cb.message?.message_id, reply_markup: { inline_keyboard: [] } }, { timeoutMs: 15000 }).catch(() => {});
+  await sendMessage(chatId, `✅ <b>${bills.esc(bill.biller)}</b> marked paid.`);
+  return notifyHousehold(db, link.user_id, `✅ <b>${bills.esc(link.display_name)}</b> paid <b>${bills.esc(bill.biller)}</b>${bill.amount != null ? ` (${digest.fmt2(bill.amount)})` : ''}.`);
 }
 
 // The same, starting from the chat the change came from
@@ -608,7 +733,7 @@ async function start(dependencies) {
   deps = { askBudget, applyChanges: askActions.apply, ...dependencies };
   digest = dependencies.digest;
   screenshots.init({
-    callTelegram, sendMessage, logActivity, notifyOthers,
+    callTelegram, sendMessage, logActivity, notifyOthers, notifyOthersWithFile,
     getDeps: () => deps, apiBase: API, token,
   });
   if (!isConfigured()) {
@@ -631,6 +756,7 @@ async function start(dependencies) {
       { command: 'digest', description: 'Daily update with the card' },
       { command: 'week', description: 'This week by person and category' },
       { command: 'offset', description: 'Offset balance, buckets, payoff date' },
+      { command: 'bills', description: 'Unpaid bills, with the bills themselves' },
       { command: 'today', description: "Today's spending" },
       { command: 'month', description: 'Last 30 days' },
       { command: 'undo', description: 'Remove the last thing I added' },
@@ -644,6 +770,11 @@ async function start(dependencies) {
   state.startedAt = new Date().toISOString();
   console.log(`[telegram] bot @${state.me.username} polling`);
   pollLoop();
+
+  // Bill reminders: check now and every 10 minutes (each is sent once)
+  const remind = () => deps.getDb().then(sendBillReminders).catch(err => console.error(`[bills] reminders failed: ${err.message}`));
+  remind();
+  setInterval(remind, 10 * 60 * 1000);
   return true;
 }
 
@@ -683,4 +814,4 @@ async function broadcast(db, text, { kind = 'digest', respectDigestFlag = false 
   return sent;
 }
 
-module.exports = { start, stop, status, isConfigured, sendMessage, sendPhoto, broadcast, broadcastDigest, notifyHousehold, parseExpenseMessage, looksLikeQuestion };
+module.exports = { start, stop, status, isConfigured, sendMessage, sendPhoto, broadcast, broadcastDigest, notifyHousehold, sendBillReminders, parseExpenseMessage, looksLikeQuestion };

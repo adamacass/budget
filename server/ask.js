@@ -45,6 +45,7 @@ Schema (dates stored as TEXT 'YYYY-MM-DD' unless noted; amounts are AUD):
 - category_budgets(category, monthly_amount) - the monthly budget per category.
 - levers(name, value, lever_type, active) - settings such as 'Mortgage Rate' (percent), 'Mortgage Monthly', 'Mortgage Start Date', 'Mortgage Term Years', 'Budget Scale %'. value is TEXT; cast it.
 - upcoming_expenses(description, estimated_amount, expected_date, category, resolved)
+- bills(id, user_id, biller, amount, due_date, reference, category, paid_at, paid_by, created_at) - bills sent to the bot. Unpaid when paid_at is null.
 - retention_profiles, category_rules, weekly_checkins - supporting tables.
 
 Answering:

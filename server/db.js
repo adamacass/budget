@@ -256,6 +256,28 @@ async function initSchema() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    -- Bills photographed or forwarded to the Telegram bot, with the original
+    -- image/PDF kept. Each also has an upcoming_expenses row so the app sees it.
+    CREATE TABLE IF NOT EXISTS bills (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      biller TEXT NOT NULL,
+      amount REAL,
+      due_date TEXT,
+      reference TEXT,
+      category TEXT,
+      period_start TEXT,
+      period_end TEXT,
+      file BYTEA,
+      file_type TEXT,
+      upcoming_expense_id INTEGER REFERENCES upcoming_expenses(id),
+      reminded_early INTEGER NOT NULL DEFAULT 0,
+      reminded_due INTEGER NOT NULL DEFAULT 0,
+      paid_at TIMESTAMPTZ,
+      paid_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     -- Planned future withdrawals, used by projections (not yet actually taken out)
     CREATE TABLE IF NOT EXISTS planned_withdrawals (
       id SERIAL PRIMARY KEY,
@@ -522,6 +544,9 @@ async function ensureAiReadOnlyRole() {
     await pool.query(`GRANT SELECT ON ${AI_READABLE_TABLES.join(', ')} TO ${AI_RO_ROLE}`);
     await pool.query(`REVOKE ALL ON users FROM ${AI_RO_ROLE}`);
     await pool.query(`GRANT SELECT (${AI_READABLE_USER_COLUMNS.join(', ')}) ON users TO ${AI_RO_ROLE}`);
+    // Bill details, but not the stored file itself (big, and no use in SQL)
+    await pool.query(`REVOKE ALL ON bills FROM ${AI_RO_ROLE}`);
+    await pool.query(`GRANT SELECT (id, user_id, biller, amount, due_date, reference, category, period_start, period_end, paid_at, paid_by, created_at) ON bills TO ${AI_RO_ROLE}`);
   } catch (e) {
     // Hosted Postgres often refuses CREATE ROLE. Questions then fail closed in ask.js.
     console.error(`[ask] could not set up the ${AI_RO_ROLE} role: ${e.message}`);

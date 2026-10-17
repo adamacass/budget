@@ -11,6 +11,7 @@
 // balance on the screen becomes the offset balance when the batch is saved.
 
 const { categorizeBatch } = require('./categorize');
+const bills = require('./bills');
 
 const COLLECT_MS = 2500;              // wait this long after the last photo before reading
 const BATCH_TTL_MS = 30 * 60 * 1000;
@@ -51,10 +52,10 @@ function hasPending(chatId) {
 
 // --- receiving -------------------------------------------------------------
 
-// A Telegram photo, or an image sent as a file (uncompressed)
+// A Telegram photo, an image sent as a file (uncompressed), or a PDF (a bill)
 function imageOf(msg) {
   if (msg.photo && msg.photo.length) return { file_id: msg.photo[msg.photo.length - 1].file_id };
-  if (msg.document && /^image\//.test(msg.document.mime_type || '')) {
+  if (msg.document && /^(image\/|application\/pdf$)/.test(msg.document.mime_type || '')) {
     return { file_id: msg.document.file_id, mime: msg.document.mime_type };
   }
   return null;
@@ -89,10 +90,11 @@ async function download(fileId) {
   const file = await ctx.callTelegram('getFile', { file_id: fileId }, { timeoutMs: 20000 });
   const res = await fetch(`${ctx.apiBase}/file/bot${ctx.token()}/${file.file_path}`);
   if (!res.ok) throw new Error(`could not download it (${res.status})`);
-  const data = Buffer.from(await res.arrayBuffer()).toString('base64');
+  const bytes = Buffer.from(await res.arrayBuffer());
   const mediaType = /\.png$/i.test(file.file_path) ? 'image/png'
-    : /\.webp$/i.test(file.file_path) ? 'image/webp' : 'image/jpeg';
-  return { data, mediaType };
+    : /\.webp$/i.test(file.file_path) ? 'image/webp'
+    : /\.pdf$/i.test(file.file_path) ? 'application/pdf' : 'image/jpeg';
+  return { bytes, data: bytes.toString('base64'), mediaType };
 }
 
 // --- reading ---------------------------------------------------------------
@@ -118,7 +120,8 @@ async function readBatch(db, chatId, buf) {
   const reads = await Promise.all(buf.photos.map(async (p, k) => {
     try {
       const img = await download(p.file_id);
-      return { shot: firstShot + k, ...(await deps.claude.extractTransactionsFromImage(img.data, p.mime || img.mediaType)) };
+      const type = p.mime || img.mediaType;
+      return { shot: firstShot + k, file: img.bytes, fileType: type, ...(await deps.claude.extractTransactionsFromImage(img.data, type)) };
     } catch (e) {
       return { shot: firstShot + k, error: e.message };
     }
@@ -128,6 +131,29 @@ async function readBatch(db, chatId, buf) {
   for (const r of reads) {
     if (r.error) {
       batch.reports.push({ shot: r.shot, error: r.error });
+      continue;
+    }
+    if (r.screen_type === 'bill' && r.bill) {
+      const b = r.bill;
+      const item = {
+        shot: r.shot, kind: 'bill', status: 'new', reason: null,
+        description: String(b.biller || '').trim() || 'Bill',
+        amount: typeof b.amount_due === 'number' ? Math.round(b.amount_due * 100) / 100 : null,
+        date: b.due_date && /^\d{4}-\d{2}-\d{2}$/.test(b.due_date) ? b.due_date : null,
+        reference: b.reference || null,
+        category: b.category || 'Utilities',
+        period_start: b.period_start, period_end: b.period_end,
+        file: r.file, fileType: r.fileType,
+        checked: true,
+      };
+      if (await bills.isDuplicate(db, { biller: item.description, amount: item.amount, due_date: item.date })) {
+        item.status = 'skip'; item.reason = 'already saved';
+      }
+      item.compare = await bills.compareWithLast(db, {
+        biller: item.description, amount: item.amount, period_start: item.period_start, period_end: item.period_end,
+      });
+      batch.reports.push({ shot: r.shot, bill: true, name: item.description });
+      batch.items.push(item);
       continue;
     }
     const isOffset = r.account_kind === 'offset';
@@ -187,7 +213,9 @@ async function markDuplicates(db, batch) {
   batch.items.forEach((item, idx) => {
     const key = `${item.kind}|${item.date}|${item.amount}|${normDesc(item.description)}`;
     if (!seen.has(key)) { seen.set(key, idx); return; }
-    if (item.status === 'new' && !item.checked) {
+    // (bills are checked against the database when read, but two photos of
+    // the same bill in one batch still count as a duplicate)
+    if (item.status === 'new' && (!item.checked || item.kind === 'bill')) {
       item.status = 'skip'; item.reason = `same as ${seen.get(key) + 1}`;
     }
   });
@@ -226,12 +254,29 @@ function counts(batch) {
   const live = batch.items.filter(i => i.status === 'new');
   return {
     expenses: live.filter(i => i.kind === 'expense'),
-    offset: live.filter(i => i.kind !== 'expense'),
+    offset: live.filter(i => i.kind === 'offset_in' || i.kind === 'offset_out'),
+    bills: live.filter(i => i.kind === 'bill'),
     total: live.length + (batch.balance ? 1 : 0),
   };
 }
 
+function billItemLine(item, n, html) {
+  const due = item.date ? `due ${bills.niceDate(item.date)}` : 'no due date';
+  const amount = item.amount != null ? money(item.amount) : 'amount not shown';
+  if (!html) {
+    return `${n}. Bill: ${item.description} ${amount} ${due} [${item.category}]` +
+      (item.reference ? ` ref ${item.reference}` : '') +
+      (item.status === 'skip' ? ` (not saving: ${item.reason})` : '');
+  }
+  let body = `${n}. 🧾 <b>${esc(item.description)}</b>  ${amount}  ${due}`;
+  if (!item.date && item.status === 'new') body += `\n      <i>no due date found; reply e.g. <code>${n} due 20/11</code> to add one</i>`;
+  if (item.compare) body += `\n      <i>${esc(item.compare.text)}</i>`;
+  if (item.reference) body += `\n      ref ${esc(item.reference)}`;
+  return item.status === 'skip' ? `<s>${body.split('\n')[0]}</s>  <i>${esc(item.reason)}</i>` : body;
+}
+
 function itemLine(item, n, html) {
+  if (item.kind === 'bill') return billItemLine(item, n, html);
   const sign = item.kind === 'offset_in' ? '+' : item.kind === 'offset_out' ? '−' : '';
   const what = item.kind === 'expense' ? (item.category || 'Other') : (item.kind === 'offset_in' ? 'deposit' : 'withdrawal');
   if (!html) {
@@ -261,6 +306,7 @@ async function showPreview(batch, heading) {
   lines.push(heading || `📷 <b>${shots} screenshot${shots === 1 ? '' : 's'}</b> from ${esc(batch.displayName)}`);
   for (const r of batch.reports) {
     if (r.error) lines.push(`   #${r.shot}: ❌ couldn't read it (${esc(r.error)})`);
+    else if (r.bill) lines.push(`   #${r.shot}: bill from ${esc(r.name)}`);
     else lines.push(`   #${r.shot}: ${r.offset ? 'offset' : esc(r.name || 'spending')}, ${r.count} transaction${r.count === 1 ? '' : 's'}${r.balance != null && r.offset ? `, balance ${money(r.balance)}` : ''}`);
   }
   lines.push('');
@@ -282,6 +328,7 @@ async function showPreview(batch, heading) {
     for (const r of rows) lines.push(itemLine(r.item, r.n, true));
     lines.push('');
   };
+  section('Bills', ['bill']);
   section('Spending', ['expense']);
   section('Offset', ['offset_in', 'offset_out']);
 
@@ -289,6 +336,7 @@ async function showPreview(batch, heading) {
     lines.push('Nothing I could save from these.');
   } else {
     const parts = [];
+    if (c.bills.length) parts.push(`${c.bills.length} bill${c.bills.length === 1 ? '' : 's'} with reminders`);
     if (c.expenses.length) parts.push(`${c.expenses.length} expense${c.expenses.length === 1 ? '' : 's'} (${money(c.expenses.reduce((s, i) => s + i.amount, 0))})`);
     if (c.offset.length) parts.push(`${c.offset.length} offset movement${c.offset.length === 1 ? '' : 's'}`);
     if (batch.balance) parts.push('the offset balance');
@@ -352,7 +400,7 @@ async function onText(db, link, msg, text) {
       case 'remove': item.status = 'skip'; item.reason = 'removed'; break;
       case 'include': item.status = 'new'; item.reason = null; break;
       case 'set_category':
-        if (item.kind === 'expense' && categories.includes(e.value)) { item.category = e.value; item.confidence = 'high'; }
+        if ((item.kind === 'expense' || item.kind === 'bill') && categories.includes(e.value)) { item.category = e.value; item.confidence = 'high'; }
         break;
       case 'set_amount': {
         const v = Math.abs(parseFloat(String(e.value).replace(/[$,]/g, '')));
@@ -396,6 +444,10 @@ async function onCallback(db, link, cb, action, id) {
   await deleteMessages(chatId, batch.previewIds);
 
   const lines = ['✅ <b>Saved</b>'];
+  for (const b of saved.bills) {
+    lines.push(`   ${bills.billLine({ biller: b.description, amount: b.amount, due_date: b.date })}`);
+    lines.push(b.date ? `      I'll remind you both 3 days before and on the day.` : `      No due date on it, so no reminder.`);
+  }
   if (saved.expenses) lines.push(`   ${saved.expenses} expense${saved.expenses === 1 ? '' : 's'}, ${money(saved.expenseTotal)}`);
   if (saved.skipped) lines.push(`   skipped ${saved.skipped} already in the app`);
   if (saved.offsetMoves) lines.push(`   ${saved.offsetMoves} offset movement${saved.offsetMoves === 1 ? '' : 's'}`);
@@ -409,11 +461,21 @@ async function onCallback(db, link, cb, action, id) {
   if (bits.length) {
     await ctx.notifyOthers(db, chatId, `📷 ${esc(link.display_name)} saved ${bits.join(', ')} from screenshots.`);
   }
+
+  // Each bill goes to the other person with the bill itself attached
+  for (const b of saved.bills) {
+    const caption = [
+      `🧾 <b>${esc(link.display_name)}</b> added a bill: ${bills.billLine({ biller: b.description, amount: b.amount, due_date: b.date })}`,
+      b.compare ? `<i>${esc(b.compare.text)}</i>` : '',
+      b.reference ? `ref ${esc(b.reference)}` : '',
+    ].filter(Boolean).join('\n');
+    await ctx.notifyOthersWithFile(db, link.user_id, { file: b.file, fileType: b.fileType, caption, billId: b.id });
+  }
 }
 
 async function save(db, link, batch) {
   const live = batch.items.filter(i => i.status === 'new');
-  const out = { expenses: 0, expenseTotal: 0, skipped: 0, offsetMoves: 0, balance: null };
+  const out = { expenses: 0, expenseTotal: 0, skipped: 0, offsetMoves: 0, balance: null, bills: [] };
 
   const client = await db.connect();
   try {
@@ -433,7 +495,16 @@ async function save(db, link, batch) {
       out.expenseTotal += item.amount;
     }
 
-    const moves = live.filter(i => i.kind !== 'expense');
+    for (const item of live.filter(i => i.kind === 'bill')) {
+      const id = await bills.saveBill(client, link.user_id, {
+        biller: item.description, amount: item.amount, due_date: item.date, reference: item.reference,
+        category: item.category, period_start: item.period_start, period_end: item.period_end,
+        file: item.file, fileType: item.fileType,
+      });
+      out.bills.push({ ...item, id });
+    }
+
+    const moves = live.filter(i => i.kind === 'offset_in' || i.kind === 'offset_out');
     let net = 0;
     for (const item of moves) {
       // Same convention as /deposit and /withdraw: a deposit is a negative withdrawal

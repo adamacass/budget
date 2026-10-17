@@ -371,6 +371,7 @@ the bot is not enough to use it.
 |---|---|
 | `42.50 woolies` | Logs the expense, auto-categorised |
 | screenshots of your banking app (several at once is fine) | Reads them together, reports any it couldn't read, lists the transactions and asks before saving. Reply with fixes first (`3 groceries`, `remove 5`, `7 is 12.50`, `include 4`). **Discard** deletes the screenshots and the list from the chat |
+| a photo or PDF of a bill | Reads the biller, amount, due date and BPAY reference, compares it with the last bill from the same biller (and per day, when both show a billing period), and after Save stores the bill with the original file, adds it to upcoming expenses, sends it to the other person, and reminds you both 3 days before and on the due date. **📅 Bills** / `/bills` lists what's unpaid, with **Show bill** and **Paid** buttons; bills due within a week appear in the daily update |
 | a screenshot of the offset account (e.g. NAB's offset screen) | Records the deposits and withdrawals shown and sets the offset balance to the one on screen. Loan repayments and anything already recorded are left out |
 | `/offset` | Balance, buckets, interest saved, payoff date |
 | `/today` `/week` `/month` | Spending summaries |
